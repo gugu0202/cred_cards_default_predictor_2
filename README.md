@@ -3,6 +3,7 @@ ML Model Deployment Pipeline
 
 
 Полная структура проекта
+```
 ├── .github/                                        # CI/CD-конфигурации и рабочие процессы GitHub Actions
 │   └── workflows/                                  # Рабочие потоки CI/CD
 │       ├── canary-release.yml                       # Конфигурация Canary-релиза
@@ -63,6 +64,7 @@ ML Model Deployment Pipeline
 │       └── load_testing.py                        # Нагрузочные тесты API
 ├── Makefile.txt                                  # Сценарий для автоматизации сборки и запуска проекта
 └── requirements.txt                              # Файл зависимостей Python
+```
 
 # Инициализация Terraform
 cd infrastructure/terraform
