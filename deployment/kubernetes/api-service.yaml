@@ -1,0 +1,108 @@
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: credit-scoring-service
+  namespace: credit-scoring-{{ .Values.environment }}
+  labels:
+    app.kubernetes.io/name: credit-scoring-api
+    app.kubernetes.io/version: {{ .Values.appVersion }}
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: credit-scoring-mlops
+    app.kubernetes.io/managed-by: helm
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9000"
+    # Load Balancer annotations for Yandex Cloud
+    yandex.cloud/load-balancer-type: "external"
+    yandex.cloud/load-balancer-protocol: "tcp"
+    yandex.cloud/health-check-path: "/health"
+    yandex.cloud/health-check-port: "8000"
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: credit-scoring-api
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
+  - name: metrics
+    port: 9000
+    targetPort: 9000
+    protocol: TCP
+    # Для внешнего доступа к метрикам (если нужно)
+    # nodePort: 30900
+  sessionAffinity: None
+  externalTrafficPolicy: Cluster
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+
+---
+# Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: credit-scoring-ingress
+  namespace: credit-scoring-{{ .Values.environment }}
+  labels:
+    app.kubernetes.io/name: credit-scoring-api
+    app.kubernetes.io/version: {{ .Values.appVersion }}
+  annotations:
+    # NGINX Ingress Controller annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+    # Cert-Manager annotations for TLS
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  tls:
+  - hosts:
+    - api.credit-scoring.{{ .Values.domain }}
+    secretName: credit-scoring-tls
+  rules:
+  - host: api.credit-scoring.{{ .Values.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: credit-scoring-service
+            port:
+              number: 80
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: credit-scoring-service
+            port:
+              number: 9000
+      - path: /docs
+        pathType: Prefix
+        backend:
+          service:
+            name: credit-scoring-service
+            port:
+              number: 8000
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: credit-scoring-service
+            port:
+              number: 8000

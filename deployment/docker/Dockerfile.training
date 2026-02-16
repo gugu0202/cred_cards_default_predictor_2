@@ -1,0 +1,69 @@
+# Stage 1: Base with CUDA for GPU training
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 as cuda-base
+
+# Stage 2: Builder
+FROM python:3.9-slim as builder
+
+WORKDIR /app
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt requirements-training.txt ./
+
+# Установка PyTorch с поддержкой CUDA
+RUN pip install --user --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Установка остальных зависимостей
+RUN pip install --user --no-cache-dir \
+    -r requirements.txt \
+    -r requirements-training.txt
+
+# Stage 3: Training runtime
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Копирование зависимостей из builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Установка системных зависимостей для обучения
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование исходного кода
+COPY scripts/ ./scripts
+COPY config/ ./config
+COPY dvc.yaml dvc.lock ./
+COPY .dvc/ .dvc/
+
+# Установка DVC
+RUN pip install --user --no-cache-dir dvc[s3] mlflow
+
+# Создание директорий для данных
+RUN mkdir -p /app/data /app/models /app/artifacts
+
+# Переменные окружения для MLflow
+ENV MLFLOW_TRACKING_URI=""
+ENV MLFLOW_EXPERIMENT_NAME="credit-scoring"
+ENV DVC_REMOTE_URL=""
+
+# Создание пользователя
+RUN groupadd -r trainer && useradd -r -g trainer trainer \
+    && chown -R trainer:trainer /app
+USER trainer
+
+WORKDIR /app/scripts
+
+# Команда по умолчанию
+CMD ["python", "model_training/train_nn_model.py"]

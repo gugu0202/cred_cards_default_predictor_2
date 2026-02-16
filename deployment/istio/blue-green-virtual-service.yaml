@@ -1,0 +1,240 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: credit-scoring
+  namespace: credit-scoring-production
+spec:
+  hosts:
+  - credit-scoring-service.credit-scoring-production.svc.cluster.local
+  - api.credit-scoring.example.com
+  gateways:
+  - credit-scoring-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: credit-scoring-service
+        subset: blue
+      weight: 100
+    - destination:
+        host: credit-scoring-service
+        subset: green
+      weight: 0
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: credit-scoring
+  namespace: credit-scoring-production
+spec:
+  host: credit-scoring-service
+  subsets:
+  - name: blue
+    labels:
+      version: blue
+  - name: green
+    labels:
+      version: green
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: credit-scoring-api-blue
+  namespace: credit-scoring-production
+  labels:
+    app: credit-scoring-api
+    version: blue
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: credit-scoring-api
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: credit-scoring-api
+        version: blue
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/your-org/credit-scoring-mlops:blue-version
+        ports:
+        - containerPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: credit-scoring-api-green
+  namespace: credit-scoring-production
+  labels:
+    app: credit-scoring-api
+    version: green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: credit-scoring-api
+      version: green
+  template:
+    metadata:
+      labels:
+        app: credit-scoring-api
+        version: green
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/your-org/credit-scoring-mlops:green-version
+        ports:
+        - containerPort: 8000
+---
+# Script для Blue-Green переключения
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blue-green-switch-script
+  namespace: credit-scoring-production
+data:
+  switch-traffic.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Starting Blue-Green deployment switch..."
+    
+    # Определяем текущую активную версию
+    CURRENT_WEIGHT=$(kubectl get virtualservice credit-scoring -n credit-scoring-production -o json | \
+      jq -r '.spec.http[0].route[] | select(.weight != 0) | .destination.subset')
+    
+    if [ "$CURRENT_WEIGHT" == "blue" ]; then
+      ACTIVE="blue"
+      INACTIVE="green"
+      ACTIVE_DEPLOYMENT="credit-scoring-api-blue"
+      INACTIVE_DEPLOYMENT="credit-scoring-api-green"
+    else
+      ACTIVE="green"
+      INACTIVE="blue"
+      ACTIVE_DEPLOYMENT="credit-scoring-api-green"
+      INACTIVE_DEPLOYMENT="credit-scoring-api-blue"
+    fi
+    
+    echo "Current active version: $ACTIVE"
+    echo "Deploying new version to: $INACTIVE"
+    
+    # Обновляем inactive deployment с новым образом
+    NEW_IMAGE=$1
+    if [ -z "$NEW_IMAGE" ]; then
+      echo "Error: New image tag required"
+      exit 1
+    fi
+    
+    kubectl set image deployment/$INACTIVE_DEPLOYMENT \
+      api=$NEW_IMAGE \
+      -n credit-scoring-production
+    
+    # Ждем готовности нового deployment
+    kubectl rollout status deployment/$INACTIVE_DEPLOYMENT \
+      -n credit-scoring-production \
+      --timeout=300s
+    
+    echo "New version deployed to $INACTIVE"
+    
+    # Тестируем новую версию
+    echo "Testing new version..."
+    INACTIVE_POD=$(kubectl get pods -n credit-scoring-production \
+      -l version=$INACTIVE \
+      -o jsonpath='{.items[0].metadata.name}')
+    
+    kubectl exec $INACTIVE_POD -n credit-scoring-production -- \
+      curl -f http://localhost:8000/health
+    
+    # Переключаем трафик
+    echo "Switching traffic from $ACTIVE to $INACTIVE..."
+    
+    # Постепенное переключение трафика
+    for percentage in 10 25 50 75 100; do
+      echo "Shifting $percentage% traffic to $INACTIVE..."
+      
+      # Обновляем веса в VirtualService
+      cat <<EOF | kubectl apply -f -
+    apiVersion: networking.istio.io/v1beta1
+    kind: VirtualService
+    metadata:
+      name: credit-scoring
+      namespace: credit-scoring-production
+    spec:
+      hosts:
+      - credit-scoring-service.credit-scoring-production.svc.cluster.local
+      - api.credit-scoring.example.com
+      gateways:
+      - credit-scoring-gateway
+      http:
+      - match:
+        - uri:
+            prefix: /
+        route:
+        - destination:
+            host: credit-scoring-service
+            subset: $ACTIVE
+          weight: $((100 - percentage))
+        - destination:
+            host: credit-scoring-service
+            subset: $INACTIVE
+          weight: $percentage
+    EOF
+      
+      # Ждем и мониторим
+      sleep 30
+      
+      # Проверяем метрики ошибок
+      ERROR_RATE=$(kubectl exec -n monitoring \
+        $(kubectl get pods -n monitoring -l app=prometheus -o jsonpath='{.items[0].metadata.name}') \
+        -- wget -qO- "http://localhost:9090/api/v1/query?query=rate(http_requests_total{version=\"$INACTIVE\",status!~\"2..\"}[1m])/rate(http_requests_total{version=\"$INACTIVE\"}[1m])*100" | \
+        jq '.data.result[0].value[1]' | tr -d '"')
+      
+      if (( $(echo "$ERROR_RATE > 2.0" | bc -l) )); then
+        echo "Error rate too high: $ERROR_RATE%. Rolling back..."
+        
+        # Возвращаем весь трафик на активную версию
+        cat <<EOF | kubectl apply -f -
+    apiVersion: networking.istio.io/v1beta1
+    kind: VirtualService
+    metadata:
+      name: credit-scoring
+      namespace: credit-scoring-production
+    spec:
+      hosts:
+      - credit-scoring-service.credit-scoring-production.svc.cluster.local
+      - api.credit-scoring.example.com
+      gateways:
+      - credit-scoring-gateway
+      http:
+      - match:
+        - uri:
+            prefix: /
+        route:
+        - destination:
+            host: credit-scoring-service
+            subset: $ACTIVE
+          weight: 100
+        - destination:
+            host: credit-scoring-service
+            subset: $INACTIVE
+          weight: 0
+    EOF
+        
+        echo "Traffic switched back to $ACTIVE due to high error rate"
+        exit 1
+      fi
+      
+      echo "Traffic shift $percentage% complete with error rate: $ERROR_RATE%"
+    done
+    
+    echo "✅ Traffic successfully switched to $INACTIVE"
+    
+    # Можем масштабировать или удалить старый deployment
+    echo "Scaling down old deployment $ACTIVE_DEPLOYMENT..."
+    kubectl scale deployment/$ACTIVE_DEPLOYMENT --replicas=0 -n credit-scoring-production
+    
+    echo "Blue-Green deployment completed successfully"

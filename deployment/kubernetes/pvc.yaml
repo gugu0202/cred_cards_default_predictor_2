@@ -1,0 +1,146 @@
+# PersistentVolumeClaim для моделей
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models-pvc
+  namespace: credit-scoring-{{ .Values.environment }}
+  labels:
+    app.kubernetes.io/name: credit-scoring-api
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 10Gi
+  selector:
+    matchLabels:
+      type: models-storage
+
+---
+# PersistentVolume (динамически создается StorageClass)
+# Для продакшена лучше использовать managed storage
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: models-pv
+  labels:
+    type: models-storage
+    app.kubernetes.io/name: credit-scoring-api
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast-ssd
+  csi:
+    driver: yandex.csi/flash
+    volumeHandle: models-storage-{{ .Values.environment }}
+    fsType: ext4
+    volumeAttributes:
+      type: network-ssd
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values:
+          - {{ .Values.cluster.zone }}
+
+---
+# ConfigMap для инициализации моделей (init container)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: models-init-script
+  namespace: credit-scoring-{{ .Values.environment }}
+data:
+  init-models.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Initializing models directory..."
+    
+    MODELS_DIR="/app/models"
+    
+    # Проверяем, есть ли уже модели
+    if [ -f "$MODELS_DIR/credit_scoring_quantized.onnx" ]; then
+      echo "Models already exist, skipping initialization."
+      exit 0
+    fi
+    
+    # Создаем директорию если не существует
+    mkdir -p "$MODELS_DIR"
+    
+    # Проверяем доступность DVC remote
+    if [ -n "$DVC_REMOTE_URL" ] && [ -n "$DVC_REMOTE_AWS_ACCESS_KEY_ID" ]; then
+      echo "Pulling models from DVC remote..."
+      
+      # Настройка DVC remote
+      dvc remote modify --local storage \
+        url "$DVC_REMOTE_URL" \
+        access_key_id "$DVC_REMOTE_AWS_ACCESS_KEY_ID" \
+        secret_access_key "$DVC_REMOTE_AWS_SECRET_ACCESS_KEY"
+      
+      # Загружаем модели
+      dvc pull models/credit_scoring_quantized.onnx || true
+      dvc pull models/credit_scoring.onnx || true
+      dvc pull models/credit_scoring_nn.pth || true
+      
+      echo "Models downloaded successfully."
+    else
+      echo "DVC credentials not available. Using default models if any."
+      
+      # Копируем модели из образа если есть
+      if [ -d "/default-models" ]; then
+        cp -r /default-models/* "$MODELS_DIR/"
+        echo "Default models copied."
+      fi
+    fi
+    
+    # Проверяем, что хотя бы одна модель есть
+    if [ ! -f "$MODELS_DIR/credit_scoring_quantized.onnx" ] && \
+       [ ! -f "$MODELS_DIR/credit_scoring.onnx" ] && \
+       [ ! -f "$MODELS_DIR/credit_scoring_nn.pth" ]; then
+      echo "WARNING: No models found! API will fail to start."
+    else
+      echo "Models initialized successfully."
+      ls -la "$MODELS_DIR/"
+    fi
+
+---
+# Init Container в Deployment для инициализации моделей
+# (добавляется в spec.template.spec контейнеров)
+# initContainers:
+# - name: init-models
+#   image: busybox:latest
+#   command: ["/bin/sh", "/scripts/init-models.sh"]
+#   volumeMounts:
+#   - name: models-volume
+#     mountPath: /app/models
+#   - name: init-script
+#     mountPath: /scripts
+#   env:
+#   - name: DVC_REMOTE_URL
+#     valueFrom:
+#       secretKeyRef:
+#         name: credit-scoring-secrets
+#         key: dvc_remote_url
+#   - name: DVC_REMOTE_AWS_ACCESS_KEY_ID
+#     valueFrom:
+#       secretKeyRef:
+#         name: credit-scoring-secrets
+#         key: dvc_remote_aws_access_key_id
+#   - name: DVC_REMOTE_AWS_SECRET_ACCESS_KEY
+#     valueFrom:
+#       secretKeyRef:
+#         name: credit-scoring-secrets
+#         key: dvc_remote_aws_secret_access_key
+# volumes:
+# - name: init-script
+#   configMap:
+#     name: models-init-script

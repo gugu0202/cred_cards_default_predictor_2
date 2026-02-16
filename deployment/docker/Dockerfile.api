@@ -1,0 +1,103 @@
+# Stage 1: Builder - установка зависимостей и компиляция
+FROM python:3.9-slim as builder
+
+WORKDIR /app
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование файлов зависимостей
+COPY requirements.txt requirements-api.txt ./
+
+# Установка Python зависимостей в отдельный слой
+RUN pip install --user --no-cache-dir --no-warn-script-location \
+    -r requirements.txt \
+    -r requirements-api.txt
+
+# Stage 2: DVC - загрузка данных и моделей
+FROM python:3.9-slim as dvc
+
+WORKDIR /app
+
+# Установка Git и DVC
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование зависимостей Python из builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Установка DVC с S3 поддержкой
+RUN pip install --user --no-cache-dir dvc[s3]
+
+# Копирование DVC конфигурации
+COPY .dvc/ .dvc/
+COPY dvc.yaml dvc.lock ./
+
+# Копирование скриптов для загрузки данных
+COPY scripts/ scripts/
+
+# Загрузка данных и моделей через DVC (если доступны credentials)
+ARG DVC_REMOTE_URL
+ARG DVC_REMOTE_AWS_ACCESS_KEY_ID
+ARG DVC_REMOTE_AWS_SECRET_ACCESS_KEY
+
+RUN if [ -n "$DVC_REMOTE_URL" ] && [ -n "$DVC_REMOTE_AWS_ACCESS_KEY_ID" ]; then \
+    dvc remote modify --local storage access_key_id $DVC_REMOTE_AWS_ACCESS_KEY_ID; \
+    dvc remote modify --local storage secret_access_key $DVC_REMOTE_AWS_SECRET_ACCESS_KEY; \
+    dvc pull -R; \
+    else \
+    echo "DVC credentials not provided, skipping data pull"; \
+    fi
+
+# Stage 3: Runtime - финальный образ
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Установка системных зависимостей для runtime
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование Python зависимостей из builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Копирование DVC и данных
+COPY --from=dvc /app/.dvc .dvc/
+COPY --from=dvc /app/models ./models
+COPY --from=dvc /app/data ./data
+
+# Копирование исходного кода
+COPY api/ ./api
+COPY config/ ./config
+COPY scripts/ ./scripts
+
+# Создание пользователя для безопасности
+RUN groupadd -r mluser && useradd -r -g mluser mluser \
+    && chown -R mluser:mluser /app
+USER mluser
+
+# Настройка переменных окружения
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PORT=8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:$PORT/health || exit 1
+
+# Экспорт порта
+EXPOSE $PORT
+
+# Запуск приложения
+CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

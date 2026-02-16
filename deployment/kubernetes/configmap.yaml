@@ -1,0 +1,165 @@
+# ConfigMap для конфигурации приложения
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: credit-scoring-config
+  namespace: credit-scoring-{{ .Values.environment }}
+  labels:
+    app.kubernetes.io/name: credit-scoring-api
+    app.kubernetes.io/component: config
+data:
+  # Конфигурация приложения
+  app-config.yaml: |
+    environment: {{ .Values.environment }}
+    model:
+      version: {{ .Values.modelVersion }}
+      path: /app/models/credit_scoring_quantized.onnx
+      type: onnx
+      batch_size: {{ .Values.batchSize }}
+    
+    inference:
+      workers: {{ .Values.maxWorkers }}
+      timeout: 30
+      max_batch_size: 128
+    
+    monitoring:
+      enabled: true
+      metrics_port: 9000
+      collect_metrics: true
+      collect_traces: true
+    
+    logging:
+      level: {{ .Values.logLevel }}
+      format: json
+      output: stdout
+    
+    cache:
+      enabled: true
+      ttl: 300
+      max_size: 1000
+  
+  # Конфигурация feature engineering
+  features-config.yaml: |
+    numerical_features:
+      - age
+      - income
+      - loan_amount
+      - credit_history_length
+      - debt_to_income_ratio
+    
+    categorical_features:
+      - employment_status
+      - home_ownership
+      - loan_purpose
+      - marital_status
+    
+    feature_scaling:
+      method: standard
+      fit_on_training: true
+    
+    missing_values:
+      strategy: median
+      fill_value: -999
+  
+  # Конфигурация безопасности
+  security-config.yaml: |
+    rate_limiting:
+      enabled: true
+      requests_per_minute: 100
+      burst: 20
+    
+    authentication:
+      enabled: {{ .Values.authentication.enabled }}
+      required_for_prediction: true
+      api_key_header: X-API-Key
+    
+    cors:
+      enabled: true
+      allow_origins:
+        - "*"
+      allow_methods:
+        - GET
+        - POST
+        - OPTIONS
+      allow_headers:
+        - Content-Type
+        - X-API-Key
+      max_age: 600
+
+---
+# Secret для чувствительных данных
+apiVersion: v1
+kind: Secret
+metadata:
+  name: credit-scoring-secrets
+  namespace: credit-scoring-{{ .Values.environment }}
+  labels:
+    app.kubernetes.io/name: credit-scoring-api
+    app.kubernetes.io/component: secrets
+type: Opaque
+stringData:
+  # MLflow configuration
+  mlflow_tracking_uri: {{ .Values.mlflow.trackingUri | b64enc }}
+  mlflow_registry_uri: {{ .Values.mlflow.registryUri | b64enc }}
+  
+  # DVC configuration
+  dvc_remote_url: {{ .Values.dvc.remoteUrl | b64enc }}
+  dvc_remote_aws_access_key_id: {{ .Values.dvc.accessKeyId | b64enc }}
+  dvc_remote_aws_secret_access_key: {{ .Values.dvc.secretAccessKey | b64enc }}
+  
+  # Database connection
+  database_url: {{ .Values.database.url | b64enc }}
+  database_password: {{ .Values.database.password | b64enc }}
+  
+  # API security
+  api_key: {{ .Values.api.key | b64enc }}
+  jwt_secret: {{ .Values.api.jwtSecret | b64enc }}
+  
+  # External service credentials
+  prometheus_url: {{ .Values.monitoring.prometheusUrl | b64enc }}
+  grafana_url: {{ .Values.monitoring.grafanaUrl | b64enc }}
+  alertmanager_url: {{ .Values.monitoring.alertmanagerUrl | b64enc }}
+
+---
+# Service Account для приложения
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: credit-scoring-sa
+  namespace: credit-scoring-{{ .Values.environment }}
+  labels:
+    app.kubernetes.io/name: credit-scoring-api
+automountServiceAccountToken: true
+
+---
+# Role и RoleBinding для ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: credit-scoring-role
+  namespace: credit-scoring-{{ .Values.environment }}
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: credit-scoring-role-binding
+  namespace: credit-scoring-{{ .Values.environment }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: credit-scoring-role
+subjects:
+- kind: ServiceAccount
+  name: credit-scoring-sa
+  namespace: credit-scoring-{{ .Values.environment }}

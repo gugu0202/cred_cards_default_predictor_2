@@ -1,0 +1,550 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "drift-detection",
+    "title": "Credit Scoring - Drift Detection",
+    "tags": ["credit-scoring", "mlops", "drift", "monitoring"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "📊 Data Drift Overview",
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+        "targets": [
+          {
+            "expr": "data_drift_score",
+            "legendFormat": "Drift Score",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {"color": "green"},
+                  "0.3": {"color": "yellow"},
+                  "0.5": {"color": "red"}
+                },
+                "from": "0",
+                "to": "1"
+              }
+            ],
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.3},
+                {"color": "red", "value": 0.5}
+              ]
+            },
+            "unit": "percentunit"
+          }
+        },
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"],
+            "fields": ""
+          },
+          "orientation": "horizontal",
+          "textMode": "value_and_name"
+        }
+      },
+      {
+        "id": 2,
+        "title": "🎯 Concept Drift Score",
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+        "targets": [
+          {
+            "expr": "concept_drift_score",
+            "legendFormat": "Concept Drift",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {"color": "green"},
+                  "0.4": {"color": "yellow"},
+                  "0.6": {"color": "red"}
+                }
+              }
+            ],
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.4},
+                {"color": "red", "value": 0.6}
+              ]
+            },
+            "unit": "percentunit"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "📈 Data Drift Timeline",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "data_drift_score",
+            "legendFormat": "Data Drift",
+            "refId": "A"
+          },
+          {
+            "expr": "concept_drift_score",
+            "legendFormat": "Concept Drift",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barAlignment": 0,
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "spanNulls": false,
+              "showPoints": "never",
+              "pointSize": 5
+            },
+            "color": {
+              "mode": "palette-classic"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.3},
+                {"color": "red", "value": 0.5}
+              ]
+            }
+          }
+        },
+        "options": {
+          "tooltip": {
+            "mode": "single"
+          },
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "📊 Feature Drift Distribution",
+        "type": "bargauge",
+        "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "topk(10, feature_drift_score)",
+            "legendFormat": "{{feature}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.3},
+                {"color": "red", "value": 0.5}
+              ]
+            },
+            "min": 0,
+            "max": 1,
+            "unit": "percentunit"
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient",
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          },
+          "text": {}
+        }
+      },
+      {
+        "id": 5,
+        "title": "📉 Model Performance Over Time",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "model_accuracy",
+            "legendFormat": "Accuracy",
+            "refId": "A"
+          },
+          {
+            "expr": "model_precision",
+            "legendFormat": "Precision",
+            "refId": "B"
+          },
+          {
+            "expr": "model_recall",
+            "legendFormat": "Recall",
+            "refId": "C"
+          },
+          {
+            "expr": "model_f1_score",
+            "legendFormat": "F1 Score",
+            "refId": "D"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barAlignment": 0,
+              "lineWidth": 2,
+              "fillOpacity": 10
+            },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "🚨 Drift Alerts",
+        "type": "table",
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "drift_alerts",
+            "instant": true,
+            "format": "table",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "align": "auto",
+              "displayMode": "color-text"
+            },
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "critical": {"color": "red"},
+                  "warning": {"color": "yellow"},
+                  "info": {"color": "blue"}
+                },
+                "id": 1
+              }
+            ]
+          }
+        },
+        "options": {
+          "showHeader": true,
+          "footer": {
+            "show": false,
+            "reducer": ["sum"],
+            "fields": ""
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "📊 Prediction Distribution Comparison",
+        "type": "barchart",
+        "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "sum by (prediction_bin) (prediction_distribution_reference)",
+            "legendFormat": "Reference",
+            "refId": "A"
+          },
+          {
+            "expr": "sum by (prediction_bin) (prediction_distribution_current)",
+            "legendFormat": "Current",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barAlignment": 0,
+              "lineWidth": 2,
+              "fillOpacity": 80,
+              "gradientMode": "none",
+              "spanNulls": false,
+              "showPoints": "never",
+              "pointSize": 5,
+              "stacking": {
+                "mode": "normal",
+                "group": "A"
+              },
+              "axisPlacement": "auto",
+              "axisLabel": "",
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "📈 Accuracy Trend & Drift Correlation",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 28, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "model_accuracy",
+            "legendFormat": "Accuracy",
+            "refId": "A"
+          },
+          {
+            "expr": "data_drift_score * 100",
+            "legendFormat": "Data Drift (scaled)",
+            "refId": "B"
+          },
+          {
+            "expr": "concept_drift_score * 100",
+            "legendFormat": "Concept Drift (scaled)",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barAlignment": 0,
+              "lineWidth": 2,
+              "fillOpacity": 10
+            },
+            "unit": "percent"
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "🔄 Retraining Recommendations",
+        "type": "table",
+        "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "retraining_recommendations",
+            "instant": true,
+            "format": "table",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "align": "auto",
+              "displayMode": "color-text"
+            },
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "CRITICAL": {"color": "red"},
+                  "HIGH": {"color": "orange"},
+                  "MEDIUM": {"color": "yellow"},
+                  "LOW": {"color": "green"}
+                }
+              }
+            ]
+          }
+        },
+        "options": {
+          "showHeader": true
+        }
+      },
+      {
+        "id": 10,
+        "title": "📊 Data Quality Metrics",
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 24, "w": 4, "h": 4},
+        "targets": [
+          {
+            "expr": "data_quality_score",
+            "legendFormat": "Quality Score",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {"color": "red"},
+                  "0.7": {"color": "yellow"},
+                  "0.9": {"color": "green"}
+                }
+              }
+            ],
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 0.7},
+                {"color": "green", "value": 0.9}
+              ]
+            },
+            "unit": "percentunit"
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "🎯 Target Distribution",
+        "type": "piechart",
+        "gridPos": {"x": 16, "y": 24, "w": 8, "h": 8},
+        "targets": [
+          {
+            "expr": "sum by (target_class) (target_distribution_reference)",
+            "legendFormat": "Reference - {{target_class}}",
+            "refId": "A"
+          },
+          {
+            "expr": "sum by (target_class) (target_distribution_current)",
+            "legendFormat": "Current - {{target_class}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              },
+              "pieType": "pie"
+            }
+          }
+        },
+        "options": {
+          "pieType": "pie",
+          "displayLabels": ["name", "percent"],
+          "legend": {
+            "displayMode": "list",
+            "placement": "right"
+          }
+        }
+      }
+    ],
+    "time": {
+      "from": "now-7d",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h"],
+      "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+    },
+    "templating": {
+      "list": [
+        {
+          "current": {
+            "selected": true,
+            "text": "7 days",
+            "value": "7d"
+          },
+          "hide": 0,
+          "label": "Time Range",
+          "name": "time_range",
+          "options": [
+            {"selected": false, "text": "1 day", "value": "1d"},
+            {"selected": false, "text": "7 days", "value": "7d"},
+            {"selected": true, "text": "30 days", "value": "30d"},
+            {"selected": false, "text": "90 days", "value": "90d"}
+          ],
+          "query": "1d,7d,30d,90d",
+          "type": "custom"
+        },
+        {
+          "current": {
+            "selected": true,
+            "text": "credit-scoring-production",
+            "value": "credit-scoring-production"
+          },
+          "hide": 0,
+          "label": "Namespace",
+          "name": "namespace",
+          "options": [
+            {"selected": true, "text": "credit-scoring-production", "value": "credit-scoring-production"},
+            {"selected": false, "text": "credit-scoring-staging", "value": "credit-scoring-staging"}
+          ],
+          "query": "label_values(kube_namespace_labels, namespace)",
+          "refresh": 1,
+          "type": "query"
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "builtIn": 1,
+          "datasource": "-- Grafana --",
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "type": "dashboard"
+        }
+      ]
+    },
+    "refresh": "1m",
+    "schemaVersion": 35,
+    "version": 1,
+    "links": [
+      {
+        "icon": "external link",
+        "tags": [],
+        "targetBlank": true,
+        "title": "Evidently Reports",
+        "type": "link",
+        "url": "../monitoring/reports/"
+      },
+      {
+        "icon": "dashboard",
+        "tags": ["metrics"],
+        "targetBlank": false,
+        "title": "Model Metrics",
+        "type": "dashboards",
+        "url": ""
+      },
+      {
+        "icon": "cog",
+        "tags": [],
+        "targetBlank": true,
+        "title": "Retraining Pipeline",
+        "type": "link",
+        "url": "http://airflow.credit-scoring-production.svc.cluster.local:8080"
+      }
+    ],
+    "panels": [],
+    "description": "Dashboard for monitoring data drift, concept drift, and model performance degradation in the credit scoring system"
+  },
+  "overwrite": true,
+  "message": "Drift detection dashboard updated"
+}

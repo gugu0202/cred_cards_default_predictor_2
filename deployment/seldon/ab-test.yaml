@@ -1,0 +1,707 @@
+# Конфигурация A/B тестирования для Seldon Core
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: credit-scoring-ab-test
+  namespace: credit-scoring-production
+spec:
+  name: credit-scoring-ab
+  protocol: kfserving
+  
+  predictors:
+    # Модель A (текущая продакшен)
+    - name: model-a
+      graph:
+        name: model-a
+        type: MODEL
+        implementation: TRITON_SERVER
+        modelUri: "s3://models-registry-production/credit_scoring_quantized.onnx"
+        parameters:
+          - name: model_name
+            type: STRING
+            value: "credit_scoring_v1"
+          - name: version
+            type: STRING
+            value: "v1.0.0"
+      
+      componentSpecs:
+        - spec:
+            containers:
+              - name: model-a-container
+                image: "nvcr.io/nvidia/tritonserver:22.12-py3"
+                args:
+                  - "tritonserver"
+                  - "--model-repository=/mnt/models"
+                  - "--http-port=9000"
+                volumeMounts:
+                  - name: models-volume-a
+                    mountPath: /mnt/models
+            initContainers:
+              - name: model-a-initializer
+                image: "seldonio/rclone-storage-initializer:1.14.0"
+                args:
+                  - "--action=download"
+                  - "--src_path=s3://models-registry-production/credit_scoring_quantized.onnx"
+                  - "--dest_path=/mnt/models"
+                volumeMounts:
+                  - name: models-volume-a
+                    mountPath: /mnt/models
+            volumes:
+              - name: models-volume-a
+                emptyDir: {}
+      
+      replicas: 2
+      traffic: 50  # 50% трафика
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/metrics"
+        ab-test-version: "v1"
+    
+    # Модель B (новая версия)
+    - name: model-b
+      graph:
+        name: model-b
+        type: MODEL
+        implementation: TRITON_SERVER
+        modelUri: "s3://models-registry-staging/credit_scoring_v2.onnx"
+        parameters:
+          - name: model_name
+            type: STRING
+            value: "credit_scoring_v2"
+          - name: version
+            type: STRING
+            value: "v2.0.0-beta"
+        children: []
+      
+      componentSpecs:
+        - spec:
+            containers:
+              - name: model-b-container
+                image: "nvcr.io/nvidia/tritonserver:22.12-py3"
+                args:
+                  - "tritonserver"
+                  - "--model-repository=/mnt/models"
+                  - "--http-port=9001"
+                volumeMounts:
+                  - name: models-volume-b
+                    mountPath: /mnt/models
+            initContainers:
+              - name: model-b-initializer
+                image: "seldonio/rclone-storage-initializer:1.14.0"
+                args:
+                  - "--action=download"
+                  - "--src_path=s3://models-registry-staging/credit_scoring_v2.onnx"
+                  - "--dest_path=/mnt/models"
+                volumeMounts:
+                  - name: models-volume-b
+                    mountPath: /mnt/models
+            volumes:
+              - name: models-volume-b
+                emptyDir: {}
+      
+      replicas: 2
+      traffic: 50  # 50% трафика
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9001"
+        prometheus.io/path: "/metrics"
+        ab-test-version: "v2"
+
+  # Сервис для A/B тестирования
+  service:
+    type: LoadBalancer
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "8000"
+
+  # Traffic split configuration
+  trafficSplit:
+    - name: model-a
+      weight: 50
+      serviceName: credit-scoring-ab-test-model-a
+    - name: model-b
+      weight: 50
+      serviceName: credit-scoring-ab-test-model-b
+
+  # Metrics для сравнения моделей
+  metrics:
+    enabled: true
+    endpoint: "http://prometheus.monitoring.svc.cluster.local:9090"
+    interval: 30s
+    metrics:
+      - name: model_a_accuracy
+        type: GAUGE
+        help: "Accuracy of Model A"
+        labels:
+          model: "credit_scoring_v1"
+      - name: model_b_accuracy
+        type: GAUGE
+        help: "Accuracy of Model B"
+        labels:
+          model: "credit_scoring_v2"
+      - name: model_a_latency_p95
+        type: GAUGE
+        help: "P95 latency of Model A"
+        labels:
+          model: "credit_scoring_v1"
+      - name: model_b_latency_p95
+        type: GAUGE
+        help: "P95 latency of Model B"
+        labels:
+          model: "credit_scoring_v2"
+
+  # Analytics для A/B теста
+  analytics:
+    enabled: true
+    interval: 60s
+    metrics:
+      - name: requests_total
+        type: COUNTER
+        endpoint: "/metrics"
+      - name: success_rate
+        type: GAUGE
+        endpoint: "/metrics"
+      - name: latency_ms
+        type: GAUGE
+        endpoint: "/metrics"
+---
+# ConfigMap для конфигурации A/B теста
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ab-test-config
+  namespace: credit-scoring-production
+data:
+  ab-test-config.yaml: |
+    # Конфигурация A/B тестирования
+    test_name: "credit_scoring_model_comparison"
+    start_time: "2024-01-15T00:00:00Z"
+    duration_days: 14
+    
+    # Метрики для сравнения
+    primary_metrics:
+      - name: "accuracy"
+        threshold: 0.85
+        weight: 0.4
+      - name: "precision"
+        threshold: 0.8
+        weight: 0.2
+      - name: "recall"
+        threshold: 0.75
+        weight: 0.2
+      - name: "latency_p95_ms"
+        threshold: 100
+        weight: 0.1
+        lower_is_better: true
+      - name: "throughput_rps"
+        threshold: 100
+        weight: 0.1
+        lower_is_better: false
+    
+    # Статистические параметры
+    statistical_power: 0.8
+    significance_level: 0.05
+    minimum_sample_size: 10000
+    
+    # Критерии успеха
+    winning_criteria:
+      - metric: "composite_score"
+        improvement: 0.05  # 5% улучшение
+      - metric: "accuracy"
+        improvement: 0.02  # 2% улучшение точности
+      - no_regression: true  # Никакой регрессии по другим метрикам
+    
+    # Автоматические действия
+    auto_actions:
+      - trigger: "model_b_wins"
+        action: "promote_to_production"
+        confidence: 0.95
+      - trigger: "no_significant_difference"
+        action: "extend_test"
+        duration_days: 7
+      - trigger: "model_b_loses"
+        action: "rollback"
+        notify: ["ml-team@company.com"]
+    
+    # Нотификации
+    notifications:
+      - channel: "slack"
+        webhook: "$SLACK_WEBHOOK_URL"
+        events: ["test_started", "significant_result", "test_completed"]
+      - channel: "email"
+        recipients: ["data-science@company.com", "ml-ops@company.com"]
+        events: ["test_completed", "action_required"]
+---
+# Service для доступа к A/B тесту
+apiVersion: v1
+kind: Service
+metadata:
+  name: credit-scoring-ab-test-service
+  namespace: credit-scoring-production
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+spec:
+  selector:
+    app.kubernetes.io/name: credit-scoring-ab-test
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  type: LoadBalancer
+---
+# Скрипт анализа результатов A/B теста
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ab-test-analysis-script
+  namespace: credit-scoring-production
+data:
+  analyze_ab_test.py: |
+    #!/usr/bin/env python3
+    """
+    Анализ результатов A/B тестирования моделей кредитного скоринга
+    """
+    
+    import pandas as pd
+    import numpy as np
+    import json
+    from datetime import datetime, timedelta
+    from scipy import stats
+    import matplotlib.pyplot as plt
+    from typing import Dict, List, Tuple
+    import mlflow
+    
+    class ABTestAnalyzer:
+        """Анализатор результатов A/B тестирования"""
+        
+        def __init__(self, prometheus_url: str = "http://prometheus.monitoring.svc.cluster.local:9090"):
+            self.prometheus_url = prometheus_url
+            self.results = {}
+            
+        def collect_metrics(self, start_time: str, end_time: str) -> Dict:
+            """Сбор метрик за период тестирования"""
+            print(f"Сбор метрик с {start_time} по {end_time}")
+            
+            # В реальной реализации здесь был бы запрос к Prometheus API
+            # Для демонстрации генерируем симулированные данные
+            
+            np.random.seed(42)
+            n_samples = 10000
+            
+            # Симулированные метрики для Model A
+            model_a_metrics = {
+                'accuracy': np.random.beta(85, 15, n_samples) / 100,  # ~85% точность
+                'precision': np.random.beta(80, 20, n_samples) / 100,
+                'recall': np.random.beta(75, 25, n_samples) / 100,
+                'latency_ms': np.random.exponential(50, n_samples),
+                'throughput_rps': np.random.normal(120, 20, n_samples)
+            }
+            
+            # Симулированные метрики для Model B (немного лучше)
+            model_b_metrics = {
+                'accuracy': np.random.beta(87, 13, n_samples) / 100,  # ~87% точность
+                'precision': np.random.beta(82, 18, n_samples) / 100,
+                'recall': np.random.beta(78, 22, n_samples) / 100,
+                'latency_ms': np.random.exponential(45, n_samples),  # Быстрее
+                'throughput_rps': np.random.normal(130, 15, n_samples)  # Выше throughput
+            }
+            
+            return {
+                'model_a': model_a_metrics,
+                'model_b': model_b_metrics,
+                'sample_size': n_samples,
+                'period': f"{start_time} to {end_time}"
+            }
+        
+        def calculate_statistical_significance(self, metrics_a: Dict, metrics_b: Dict) -> Dict:
+            """Расчет статистической значимости различий"""
+            print("Расчет статистической значимости...")
+            
+            significance_results = {}
+            
+            for metric_name in metrics_a.keys():
+                a_data = metrics_a[metric_name]
+                b_data = metrics_b[metric_name]
+                
+                # T-test для сравнения средних
+                t_stat, p_value = stats.ttest_ind(a_data, b_data, equal_var=False)
+                
+                # Разница средних
+                mean_a = np.mean(a_data)
+                mean_b = np.mean(b_data)
+                mean_diff = mean_b - mean_a
+                percent_diff = (mean_diff / mean_a) * 100 if mean_a != 0 else 0
+                
+                # Доверительный интервал
+                ci_low, ci_high = stats.t.interval(
+                    0.95, 
+                    len(a_data) + len(b_data) - 2,
+                    loc=mean_diff,
+                    scale=stats.sem(np.concatenate([a_data - mean_a, b_data - mean_b]))
+                )
+                
+                significance_results[metric_name] = {
+                    'mean_a': float(mean_a),
+                    'mean_b': float(mean_b),
+                    'mean_difference': float(mean_diff),
+                    'percent_difference': float(percent_diff),
+                    'p_value': float(p_value),
+                    'significant': p_value < 0.05,
+                    'confidence_interval': [float(ci_low), float(ci_high)],
+                    'effect_size': float(mean_diff / np.std(np.concatenate([a_data, b_data])))
+                }
+            
+            return significance_results
+        
+        def calculate_composite_score(self, metrics: Dict, weights: Dict) -> float:
+            """Расчет композитного скора"""
+            composite_score = 0
+            total_weight = 0
+            
+            for metric_name, weight in weights.items():
+                if metric_name in metrics:
+                    metric_value = metrics[metric_name]['mean_b']
+                    # Нормализуем метрики
+                    if metric_name == 'latency_ms':
+                        # Для latency меньше = лучше
+                        normalized = 1 / (1 + metric_value / 100)
+                    elif metric_name == 'throughput_rps':
+                        # Для throughput больше = лучше
+                        normalized = metric_value / 200
+                    else:
+                        # Для accuracy, precision, recall уже в диапазоне 0-1
+                        normalized = metric_value
+                    
+                    composite_score += normalized * weight
+                    total_weight += weight
+            
+            return composite_score / total_weight if total_weight > 0 else 0
+        
+        def run_analysis(self, config_path: str = "/etc/ab-test/config.yaml") -> Dict:
+            """Запуск полного анализа A/B теста"""
+            print("Запуск анализа A/B тестирования...")
+            
+            # Загрузка конфигурации
+            import yaml
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            # Сбор метрик
+            end_time = datetime.now()
+            start_time = end_time - timedelta(days=config.get('duration_days', 14))
+            
+            metrics = self.collect_metrics(
+                start_time.isoformat(),
+                end_time.isoformat()
+            )
+            
+            # Статистический анализ
+            significance = self.calculate_statistical_significance(
+                metrics['model_a'],
+                metrics['model_b']
+            )
+            
+            # Расчет композитных скоров
+            weights = {m['name']: m['weight'] for m in config['primary_metrics']}
+            composite_score_a = self.calculate_composite_score(
+                {k: {'mean_b': v['mean_a']} for k, v in significance.items()},
+                weights
+            )
+            composite_score_b = self.calculate_composite_score(significance, weights)
+            
+            # Принятие решения
+            decision = self.make_decision(significance, composite_score_a, composite_score_b, config)
+            
+            # Визуализация результатов
+            self.visualize_results(metrics, significance, config)
+            
+            # Сохранение результатов
+            results = {
+                'analysis_timestamp': datetime.now().isoformat(),
+                'test_config': config,
+                'metrics_collected': metrics,
+                'statistical_analysis': significance,
+                'composite_scores': {
+                    'model_a': composite_score_a,
+                    'model_b': composite_score_b,
+                    'improvement': composite_score_b - composite_score_a
+                },
+                'decision': decision,
+                'recommendations': self.generate_recommendations(decision, significance)
+            }
+            
+            # Логирование в MLflow
+            self.log_to_mlflow(results)
+            
+            # Сохранение отчета
+            self.save_report(results)
+            
+            print(f"Анализ завершен. Решение: {decision['verdict']}")
+            return results
+        
+        def make_decision(self, significance: Dict, score_a: float, score_b: float, config: Dict) -> Dict:
+            """Принятие решения по результатам теста"""
+            
+            # Проверяем критерии успеха
+            winning_criteria = config.get('winning_criteria', [])
+            criteria_met = []
+            
+            for criterion in winning_criteria:
+                if criterion.get('metric') == 'composite_score':
+                    improvement_needed = criterion.get('improvement', 0)
+                    actual_improvement = score_b - score_a
+                    criteria_met.append({
+                        'criterion': 'composite_score',
+                        'required': improvement_needed,
+                        'actual': actual_improvement,
+                        'met': actual_improvement >= improvement_needed
+                    })
+                
+                elif criterion.get('metric') == 'accuracy':
+                    improvement_needed = criterion.get('improvement', 0)
+                    accuracy_improvement = significance['accuracy']['percent_difference'] / 100
+                    criteria_met.append({
+                        'criterion': 'accuracy',
+                        'required': improvement_needed,
+                        'actual': accuracy_improvement,
+                        'met': accuracy_improvement >= improvement_needed
+                    })
+                
+                elif criterion.get('no_regression', False):
+                    # Проверяем, нет ли регрессии по ключевым метрикам
+                    regressions = []
+                    for metric_name, result in significance.items():
+                        if metric_name in ['accuracy', 'precision', 'recall']:
+                            if result['mean_b'] < result['mean_a'] and result['significant']:
+                                regressions.append(metric_name)
+                    
+                    criteria_met.append({
+                        'criterion': 'no_regression',
+                        'regressions_found': regressions,
+                        'met': len(regressions) == 0
+                    })
+            
+            # Принимаем решение
+            all_criteria_met = all([c['met'] for c in criteria_met])
+            significant_improvement = (score_b - score_a) > 0.05  # 5% улучшение
+            
+            if all_criteria_met and significant_improvement:
+                verdict = "MODEL_B_WINS"
+                action = "promote_to_production"
+                confidence = "high"
+            elif not any([c['met'] for c in criteria_met]):
+                verdict = "MODEL_A_WINS"
+                action = "keep_current"
+                confidence = "high"
+            else:
+                verdict = "INCONCLUSIVE"
+                action = "extend_test"
+                confidence = "medium"
+            
+            return {
+                'verdict': verdict,
+                'action': action,
+                'confidence': confidence,
+                'criteria_evaluation': criteria_met,
+                'composite_score_improvement': score_b - score_a
+            }
+        
+        def generate_recommendations(self, decision: Dict, significance: Dict) -> List[str]:
+            """Генерация рекомендаций на основе результатов"""
+            recommendations = []
+            
+            if decision['verdict'] == "MODEL_B_WINS":
+                recommendations.append("✅ Продвинуть Model B в продакшен")
+                recommendations.append("Обновить конвейер CI/CD для использования новой модели")
+                recommendations.append("Уведомить команду data science о успешном тесте")
+            
+            elif decision['verdict'] == "MODEL_A_WINS":
+                recommendations.append("✅ Оставить текущую Model A в продакшене")
+                recommendations.append("Проанализировать причины неудачи Model B")
+                recommendations.append("Рассмотреть альтернативные подходы для улучшения")
+            
+            else:  # INCONCLUSIVE
+                recommendations.append("⏳ Продлить A/B тест на 7 дней")
+                recommendations.append("Увеличить размер выборки для большей статистической мощности")
+                recommendations.append("Проанализировать метрики с наибольшей вариативностью")
+            
+            # Добавляем специфические рекомендации по метрикам
+            for metric_name, result in significance.items():
+                if result['significant'] and abs(result['percent_difference']) > 10:
+                    direction = "улучшилась" if result['percent_difference'] > 0 else "ухудшилась"
+                    recommendations.append(
+                        f"📊 Метрика '{metric_name}' {direction} на {abs(result['percent_difference']):.1f}%"
+                    )
+            
+            return recommendations
+        
+        def visualize_results(self, metrics: Dict, significance: Dict, config: Dict):
+            """Визуализация результатов A/B теста"""
+            import matplotlib.pyplot as plt
+            
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            fig.suptitle('A/B Test Results: Credit Scoring Models', fontsize=16)
+            
+            metrics_to_plot = list(metrics['model_a'].keys())[:6]
+            
+            for idx, metric_name in enumerate(metrics_to_plot):
+                ax = axes[idx // 3, idx % 3]
+                
+                # Данные для box plot
+                data_a = metrics['model_a'][metric_name]
+                data_b = metrics['model_b'][metric_name]
+                
+                bp = ax.boxplot([data_a, data_b], labels=['Model A', 'Model B'], patch_artist=True)
+                
+                # Раскрашиваем box plot
+                colors = ['lightblue', 'lightgreen']
+                for patch, color in zip(bp['boxes'], colors):
+                    patch.set_facecolor(color)
+                
+                # Добавляем статистическую значимость
+                p_value = significance[metric_name]['p_value']
+                if p_value < 0.05:
+                    # Добавляем звездочку для значимых различий
+                    y_max = max(np.max(data_a), np.max(data_b))
+                    ax.text(1.5, y_max * 1.05, f'p = {p_value:.3f}*', 
+                           ha='center', fontweight='bold', color='red')
+                
+                ax.set_title(f'{metric_name.capitalize()}')
+                ax.set_ylabel(metric_name)
+                ax.grid(True, alpha=0.3)
+            
+            # Композитный скор
+            ax = axes[1, 2]
+            composite_scores = [0.75, 0.82]  # Примерные значения
+            bars = ax.bar(['Model A', 'Model B'], composite_scores, color=['lightblue', 'lightgreen'])
+            ax.set_title('Composite Score')
+            ax.set_ylabel('Score')
+            ax.set_ylim([0, 1])
+            
+            # Добавляем значения на бары
+            for bar, score in zip(bars, composite_scores):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{score:.3f}', ha='center', va='bottom')
+            
+            plt.tight_layout()
+            
+            # Сохраняем график
+            plt.savefig('/tmp/ab_test_results.png', dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print("Визуализация сохранена: /tmp/ab_test_results.png")
+        
+        def log_to_mlflow(self, results: Dict):
+            """Логирование результатов в MLflow"""
+            try:
+                with mlflow.start_run(run_name="ab_test_analysis"):
+                    # Логируем метрики
+                    mlflow.log_metric("composite_score_a", results['composite_scores']['model_a'])
+                    mlflow.log_metric("composite_score_b", results['composite_scores']['model_b'])
+                    mlflow.log_metric("improvement", results['composite_scores']['improvement'])
+                    
+                    # Логируем статистическую значимость
+                    for metric_name, result in results['statistical_analysis'].items():
+                        mlflow.log_metric(f"{metric_name}_p_value", result['p_value'])
+                        mlflow.log_metric(f"{metric_name}_improvement", result['percent_difference'])
+                    
+                    # Логируем решение
+                    mlflow.log_param("ab_test_verdict", results['decision']['verdict'])
+                    mlflow.log_param("recommended_action", results['decision']['action'])
+                    
+                    # Логируем отчет
+                    mlflow.log_dict(results, "ab_test_report.json")
+                    
+                    # Логируем график
+                    mlflow.log_artifact("/tmp/ab_test_results.png")
+                    
+                print("Результаты залогированы в MLflow")
+            except Exception as e:
+                print(f"Ошибка при логировании в MLflow: {e}")
+        
+        def save_report(self, results: Dict):
+            """Сохранение отчета"""
+            report_path = "/tmp/ab_test_report.json"
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            
+            print(f"Отчет сохранен: {report_path}")
+            
+            # Также создаем читабельную версию
+            self.create_human_readable_report(results)
+        
+        def create_human_readable_report(self, results: Dict):
+            """Создание читабельного отчета"""
+            report = f"""
+            ========================================
+            A/B TEST REPORT: CREDIT SCORING MODELS
+            ========================================
+            
+            Дата анализа: {results['analysis_timestamp']}
+            
+            РЕЗЮМЕ:
+            ---------
+            Вердикт: {results['decision']['verdict']}
+            Рекомендуемое действие: {results['decision']['action']}
+            Уверенность: {results['decision']['confidence']}
+            
+            КОМПОЗИТНЫЕ СКОРЫ:
+            ------------------
+            Model A: {results['composite_scores']['model_a']:.3f}
+            Model B: {results['composite_scores']['model_b']:.3f}
+            Улучшение: {results['composite_scores']['improvement']:.3f} ({results['composite_scores']['improvement']*100:.1f}%)
+            
+            СТАТИСТИЧЕСКИЙ АНАЛИЗ:
+            ----------------------
+            """
+            
+            for metric_name, result in results['statistical_analysis'].items():
+                significance = "✅ ЗНАЧИМО" if result['significant'] else "❌ НЕЗНАЧИМО"
+                direction = "↑ улучшение" if result['percent_difference'] > 0 else "↓ ухудшение"
+                
+                report += f"""
+            {metric_name.upper()}:
+              • Model A: {result['mean_a']:.3f}
+              • Model B: {result['mean_b']:.3f}
+              • Разница: {result['mean_difference']:.3f} ({result['percent_difference']:.1f}%) {direction}
+              • p-value: {result['p_value']:.4f} {significance}
+              • Доверительный интервал: [{result['confidence_interval'][0]:.3f}, {result['confidence_interval'][1]:.3f}]
+                """
+            
+            report += f"""
+            
+            РЕКОМЕНДАЦИИ:
+            -------------
+            """
+            
+            for i, rec in enumerate(results['recommendations'], 1):
+                report += f"{i}. {rec}\n"
+            
+            # Сохраняем отчет
+            with open("/tmp/ab_test_human_report.txt", 'w', encoding='utf-8') as f:
+                f.write(report)
+            
+            print(f"Читабельный отчет сохранен: /tmp/ab_test_human_report.txt")
+    
+    # Основная функция
+    if __name__ == "__main__":
+        analyzer = ABTestAnalyzer()
+        results = analyzer.run_analysis()
+        
+        print("\n" + "="*60)
+        print("Анализ A/B тестирования завершен")
+        print("="*60)
+        print(f"Вердикт: {results['decision']['verdict']}")
+        print(f"Действие: {results['decision']['action']}")
+        print(f"Улучшение композитного скора: {results['composite_scores']['improvement']*100:.1f}%")
+        print("\nРекомендации:")
+        for rec in results['recommendations']:
+            print(f"  • {rec}")

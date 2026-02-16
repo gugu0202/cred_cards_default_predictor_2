@@ -1,0 +1,83 @@
+# Yandex Cloud Credentials
+yc_token                  = "your_yandex_oauth_token"
+yc_cloud_id              = "your_cloud_id"
+yc_folder_id             = "your_folder_id"
+yc_storage_access_key    = "your_storage_access_key"
+yc_storage_secret_key    = "your_storage_secret_key"
+
+# Environment
+environment = "dev"  # или "staging", "production"
+
+# Network Configuration
+region     = "ru-central1"
+zone       = "ru-central1-a"
+vpc_cidr  = "10.10.0.0/16"
+
+# Kubernetes Configuration
+cluster_version = "1.25"
+
+node_groups = {
+  cpu = {
+    memory        = 8
+    cores         = 4
+    disk_size     = 64
+    min_nodes     = 2
+    max_nodes     = 10
+    initial_nodes = 2
+    preemptible   = true
+  }
+  gpu = {
+    memory        = 32
+    cores         = 8
+    gpus          = 1
+    disk_size     = 128
+    min_nodes     = 1
+    max_nodes     = 4
+    initial_nodes = 1
+    preemptible   = false
+  }
+  spot = {
+    memory        = 4
+    cores         = 2
+    disk_size     = 32
+    min_nodes     = 1
+    max_nodes     = 5
+    initial_nodes = 1
+    preemptible   = true
+  }
+}
+
+# Application Configuration
+model_version = "v1.0.0"
+batch_size    = 32
+log_level     = "INFO"
+max_workers   = 4
+
+# Database
+database_url = "postgresql://user:password@host:5432/database"
+
+# Security
+api_key = "your_secure_api_key_here"
+
+# Monitoring
+slack_webhook_url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+slack_channel     = "#alerts"
+alert_email       = "alerts@your-company.com"
+enable_ingress    = false
+domain           = "your-domain.com"
+
+# MLflow Database
+mlflow_db_password = "secure_mlflow_db_password"
+postgresql_host    = "postgresql-host.yandexcloud.net"
+
+# Storage
+logs_bucket_name = "logs-dev-1234"
+
+# Tags
+tags = {
+  Project     = "Credit-Scoring-MLOps"
+  Department  = "Data-Science"
+  CostCenter  = "DS-001"
+  Owner       = "ml-team@your-company.com"
+  ManagedBy   = "Terraform"
+}

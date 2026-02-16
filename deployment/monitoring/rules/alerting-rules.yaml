@@ -1,0 +1,276 @@
+groups:
+  # Credit Scoring Application Alerts
+  - name: credit-scoring-app-alerts
+    rules:
+      # High error rate
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status!~"2..", namespace="credit-scoring-production"}[5m]))
+          /
+          sum(rate(http_requests_total{namespace="credit-scoring-production"}[5m]))
+          * 100 > 5
+        for: 5m
+        labels:
+          severity: critical
+          team: ml-ops
+          service: credit-scoring-api
+        annotations:
+          title: "High Error Rate Detected"
+          description: "Error rate is above 5% for the last 5 minutes"
+          impact: "Users may experience failed predictions"
+          action: "Check application logs and metrics"
+          dashboard: "credit-scoring-overview"
+          runbook: "https://runbooks.company.com/credit-scoring/high-error-rate"
+      
+      # High latency
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{namespace="credit-scoring-production"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: ml-ops
+        annotations:
+          title: "High Response Latency"
+          description: "95th percentile response latency is above 1 second"
+          impact: "Users may experience slow predictions"
+          action: "Check CPU/memory usage and database performance"
+          dashboard: "model-metrics"
+      
+      # Low throughput
+      - alert: LowThroughput
+        expr: |
+          rate(http_requests_total{namespace="credit-scoring-production"}[5m]) < 10
+        for: 10m
+        labels:
+          severity: warning
+          team: ml-ops
+        annotations:
+          title: "Low Request Throughput"
+          description: "Request rate is below 10 requests per minute"
+          impact: "Service may be unavailable or traffic is low"
+          action: "Check service availability and load balancer"
+      
+      # Model prediction failures
+      - alert: ModelPredictionFailure
+        expr: |
+          increase(model_predictions_failed_total{namespace="credit-scoring-production"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          team: ml-ops
+        annotations:
+          title: "Model Prediction Failures"
+          description: "More than 10 model prediction failures in 5 minutes"
+          impact: "Predictions are failing for users"
+          action: "Check model server logs and model file integrity"
+          runbook: "https://runbooks.company.com/credit-scoring/model-failures"
+      
+      # Data drift detected
+      - alert: DataDriftDetected
+        expr: |
+          data_drift_score > 0.3
+        for: 10m
+        labels:
+          severity: warning
+          team: data-science
+        annotations:
+          title: "Data Drift Detected"
+          description: "Data drift score above 0.3 detected"
+          impact: "Model accuracy may be degrading"
+          action: "Review drift report and consider model retraining"
+          dashboard: "drift-detection"
+      
+      # Concept drift detected
+      - alert: ConceptDriftDetected
+        expr: |
+          concept_drift_score > 0.4
+        for: 30m
+        labels:
+          severity: warning
+          team: data-science
+        annotations:
+          title: "Concept Drift Detected"
+          description: "Concept drift score above 0.4 detected"
+          impact: "Model may need retraining with new data"
+          action: "Analyze concept drift report and schedule retraining"
+  
+  # Infrastructure Alerts
+  - name: infrastructure-alerts
+    rules:
+      # Pod restarts
+      - alert: FrequentPodRestarts
+        expr: |
+          increase(kube_pod_container_status_restarts_total{namespace="credit-scoring-production", container="api"}[1h]) > 3
+        for: 5m
+        labels:
+          severity: warning
+          team: devops
+        annotations:
+          title: "Frequent Pod Restarts"
+          description: "Pod has restarted more than 3 times in the last hour"
+          impact: "Service may be unstable"
+          action: "Check pod logs and resource limits"
+      
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: |
+          sum(rate(container_cpu_usage_seconds_total{namespace="credit-scoring-production", container="api"}[5m])) 
+          / 
+          sum(kube_pod_container_resource_limits{namespace="credit-scoring-production", container="api", resource="cpu"})
+          * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: devops
+        annotations:
+          title: "High CPU Usage"
+          description: "CPU usage is above 80% of limit"
+          impact: "Performance degradation possible"
+          action: "Consider scaling up or optimizing code"
+      
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: |
+          sum(container_memory_working_set_bytes{namespace="credit-scoring-production", container="api"})
+          /
+          sum(kube_pod_container_resource_limits{namespace="credit-scoring-production", container="api", resource="memory"})
+          * 100 > 85
+        for: 10m
+        labels:
+          severity: critical
+          team: devops
+        annotations:
+          title: "High Memory Usage"
+          description: "Memory usage is above 85% of limit"
+          impact: "Pod may be OOM killed"
+          action: "Increase memory limits or optimize memory usage"
+      
+      # Out of disk space
+      - alert: OutOfDiskSpace
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} * 100 < 10
+        for: 5m
+        labels:
+          severity: critical
+          team: devops
+        annotations:
+          title: "Out of Disk Space"
+          description: "Root filesystem is less than 10% free"
+          impact: "Node may become unstable"
+          action: "Clean up disk space or add storage"
+      
+      # Node not ready
+      - alert: NodeNotReady
+        expr: |
+          kube_node_status_condition{condition="Ready", status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: devops
+        annotations:
+          title: "Node Not Ready"
+          description: "Kubernetes node is not ready"
+          impact: "Workloads may not be scheduled"
+          action: "Check node status and logs"
+  
+  # Business Metrics Alerts
+  - name: business-metrics-alerts
+    rules:
+      # Prediction volume anomaly
+      - alert: PredictionVolumeAnomaly
+        expr: |
+          abs(
+            predict_linear(http_requests_total{namespace="credit-scoring-production"}[1h], 3600)
+            -
+            http_requests_total{namespace="credit-scoring-production"}
+          ) / http_requests_total{namespace="credit-scoring-production"} > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          team: business
+        annotations:
+          title: "Prediction Volume Anomaly"
+          description: "Prediction volume deviates more than 50% from expected"
+          impact: "Unusual business activity detected"
+          action: "Review business metrics and fraud detection"
+      
+      # Approval rate anomaly
+      - alert: ApprovalRateAnomaly
+        expr: |
+          abs(
+            avg(loan_approval_rate{namespace="credit-scoring-production"})
+            -
+            predict_linear(loan_approval_rate{namespace="credit-scoring-production"}[6h], 3600)
+          ) > 0.1
+        for: 30m
+        labels:
+          severity: warning
+          team: risk
+        annotations:
+          title: "Approval Rate Anomaly"
+          description: "Loan approval rate deviates more than 10% from expected"
+          impact: "Risk policy may need adjustment"
+          action: "Review risk thresholds and model performance"
+      
+      # High risk concentration
+      - alert: HighRiskConcentration
+        expr: |
+          sum(high_risk_predictions_total{namespace="credit-scoring-production"}[1h])
+          /
+          sum(total_predictions{namespace="credit-scoring-production"}[1h])
+          * 100 > 20
+        for: 1h
+        labels:
+          severity: warning
+          team: risk
+        annotations:
+          title: "High Risk Concentration"
+          description: "More than 20% of predictions are high risk"
+          impact: "Increased portfolio risk"
+          action: "Review scoring thresholds and risk appetite"
+
+  # Dependency Alerts
+  - name: dependency-alerts
+    rules:
+      # Database connection failures
+      - alert: DatabaseConnectionFailure
+        expr: |
+          increase(database_connection_errors_total{namespace="credit-scoring-production"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          team: devops
+        annotations:
+          title: "Database Connection Failures"
+          description: "Multiple database connection errors detected"
+          impact: "Predictions may fail due to database issues"
+          action: "Check database connectivity and performance"
+      
+      # External API failures
+      - alert: ExternalAPIFailure
+        expr: |
+          increase(external_api_errors_total{namespace="credit-scoring-production"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: ml-ops
+        annotations:
+          title: "External API Failures"
+          description: "Multiple external API call failures"
+          impact: "Dependent features may be unavailable"
+          action: "Check external service status and API keys"
+      
+      # Storage availability
+      - alert: StorageUnavailable
+        expr: |
+          storage_available_bytes{namespace="credit-scoring-production"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: devops
+        annotations:
+          title: "Storage Unavailable"
+          description: "Storage for models or data is unavailable"
+          impact: "Model serving may fail"
+          action: "Check storage system and network connectivity"

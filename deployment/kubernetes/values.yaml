@@ -1,0 +1,213 @@
+# Default values for credit-scoring-api
+
+# Реплики
+replicaCount: 3
+
+# Версия приложения
+appVersion: "1.0.0"
+
+# Окружение
+environment: "dev"
+
+# Изображение
+image:
+  repository: "registry.yandexcloud.net/credit-scoring/credit-scoring-api"
+  tag: "latest"
+  pullPolicy: "IfNotPresent"
+
+# Версия модели
+modelVersion: "quantized-v1"
+
+# Параметры инференса
+batchSize: 32
+maxWorkers: 4
+logLevel: "INFO"
+
+# Автомасштабирование
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  targetRPS: "100"
+  targetLatency: 100
+
+# Конфигурация Ingress
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: api.credit-scoring.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: credit-scoring-tls
+      hosts:
+        - api.credit-scoring.example.com
+
+# Domain
+domain: "example.com"
+
+# Конфигурация ресурсов
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "500m"
+  limits:
+    memory: "1Gi"
+    cpu: "1000m"
+
+# Конфигурация MLflow
+mlflow:
+  trackingUri: "postgresql://user:pass@host:5432/mlflow"
+  registryUri: "postgresql://user:pass@host:5432/mlflow"
+
+# Конфигурация DVC
+dvc:
+  remoteUrl: "s3://bucket-name/"
+  accessKeyId: "YOUR_ACCESS_KEY"
+  secretAccessKey: "YOUR_SECRET_KEY"
+
+# База данных
+database:
+  url: "postgresql://user:pass@host:5432/database"
+  password: "db_password"
+
+# API Security
+api:
+  key: "your-api-key-here"
+  jwtSecret: "your-jwt-secret-here"
+  authentication:
+    enabled: true
+
+# Мониторинг
+monitoring:
+  prometheusUrl: "http://prometheus.monitoring.svc.cluster.local:9090"
+  grafanaUrl: "http://grafana.monitoring.svc.cluster.local:3000"
+  alertmanagerUrl: "http://alertmanager.monitoring.svc.cluster.local:9093"
+
+# Конфигурация кластера
+cluster:
+  zone: "ru-central1-a"
+
+# Node selector
+nodeSelector:
+  node-type: "cpu-optimized"
+
+# Tolerations
+tolerations:
+  - key: "spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+    tolerationSeconds: 300
+
+# Affinity
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: "app.kubernetes.io/name"
+            operator: In
+            values:
+            - "credit-scoring-api"
+        topologyKey: "kubernetes.io/hostname"
+
+# Service
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 8000
+  annotations:
+    yandex.cloud/load-balancer-type: "external"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9000"
+
+# Persistence
+persistence:
+  enabled: true
+  storageClass: "fast-ssd"
+  accessModes:
+    - ReadWriteMany
+  size: 10Gi
+
+# Pod Disruption Budget
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Pod Security Context
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+
+# Container Security Context
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Liveness и Readiness пробы
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Init containers
+initContainers:
+  - name: init-models
+    image: busybox:latest
+    command: ["/bin/sh", "/scripts/init-models.sh"]
+    volumeMounts:
+      - name: models
+        mountPath: /app/models
+      - name: init-scripts
+        mountPath: /scripts
+    env:
+      - name: DVC_REMOTE_URL
+        valueFrom:
+          secretKeyRef:
+            name: credit-scoring-secrets
+            key: dvc_remote_url
+
+# Volumes
+volumes:
+  - name: models
+    persistentVolumeClaim:
+      claimName: models-pvc
+  - name: init-scripts
+    configMap:
+      name: models-init-script
+
+# Volume mounts
+volumeMounts:
+  - name: models
+    mountPath: /app/models
+    readOnly: true

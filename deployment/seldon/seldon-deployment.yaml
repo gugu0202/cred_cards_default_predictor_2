@@ -1,0 +1,270 @@
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: credit-scoring
+  namespace: credit-scoring-production
+  labels:
+    app.kubernetes.io/name: credit-scoring
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: mlops-pipeline
+spec:
+  name: credit-scoring
+  protocol: kfserving  # Используем KServe protocol для оптимизации
+  predictors:
+    - name: default
+      graph:
+        name: credit-scoring-model
+        type: MODEL
+        implementation: TRITON_SERVER  # NVIDIA Triton для оптимальной производительности
+        modelUri: "s3://models-registry-production/credit_scoring_quantized.onnx"
+        envSecretRefName: seldon-init-container-secret
+        parameters:
+          - name: model_name
+            type: STRING
+            value: "credit_scoring"
+          - name: model_version
+            type: STRING
+            value: "v1"
+          - name: batch_size
+            type: INT
+            value: "32"
+          - name: max_batch_delay
+            type: INT
+            value: "100"
+        children: []
+      
+      componentSpecs:
+        - spec:
+            containers:
+              - name: credit-scoring-model
+                image: "nvcr.io/nvidia/tritonserver:22.12-py3"
+                args:
+                  - "tritonserver"
+                  - "--model-repository=/mnt/models"
+                  - "--http-port=9000"
+                  - "--grpc-port=9001"
+                  - "--metrics-port=9002"
+                  - "--allow-grpc=true"
+                  - "--allow-http=true"
+                  - "--log-verbose=1"
+                
+                env:
+                  - name: AWS_ACCESS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: s3-credentials
+                        key: accessKey
+                  - name: AWS_SECRET_ACCESS_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: s3-credentials
+                        key: secretKey
+                  - name: AWS_REGION
+                    value: "ru-central1"
+                  - name: S3_ENDPOINT
+                    value: "storage.yandexcloud.net"
+                
+                ports:
+                  - name: http
+                    containerPort: 9000
+                    protocol: TCP
+                  - name: grpc
+                    containerPort: 9001
+                    protocol: TCP
+                  - name: metrics
+                    containerPort: 9002
+                    protocol: TCP
+                
+                resources:
+                  requests:
+                    memory: "2Gi"
+                    cpu: "1"
+                    nvidia.com/gpu: "1"  # GPU для Triton
+                  limits:
+                    memory: "4Gi"
+                    cpu: "2"
+                    nvidia.com/gpu: "1"
+                
+                volumeMounts:
+                  - name: models-volume
+                    mountPath: /mnt/models
+                
+                livenessProbe:
+                  httpGet:
+                    path: /v2/health/live
+                    port: 9000
+                  initialDelaySeconds: 60
+                  periodSeconds: 10
+                  failureThreshold: 3
+                
+                readinessProbe:
+                  httpGet:
+                    path: /v2/health/ready
+                    port: 9000
+                  initialDelaySeconds: 30
+                  periodSeconds: 5
+                  failureThreshold: 3
+            
+            initContainers:
+              - name: model-initializer
+                image: "seldonio/rclone-storage-initializer:1.14.0"
+                args:
+                  - "--action=download"
+                  - "--src_path=s3://models-registry-production"
+                  - "--dest_path=/mnt/models"
+                env:
+                  - name: RCLONE_CONFIG_S3_TYPE
+                    value: "s3"
+                  - name: RCLONE_CONFIG_S3_PROVIDER
+                    value: "Other"
+                  - name: RCLONE_CONFIG_S3_ACCESS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: s3-credentials
+                        key: accessKey
+                  - name: RCLONE_CONFIG_S3_SECRET_ACCESS_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: s3-credentials
+                        key: secretKey
+                  - name: RCLONE_CONFIG_S3_ENDPOINT
+                    value: "https://storage.yandexcloud.net"
+                  - name: RCLONE_CONFIG_S3_REGION
+                    value: "ru-central1"
+                volumeMounts:
+                  - name: models-volume
+                    mountPath: /mnt/models
+            
+            volumes:
+              - name: models-volume
+                emptyDir: {}
+      
+      replicas: 2
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9002"
+        prometheus.io/path: "/metrics"
+      
+      engineResources:
+        requests:
+          memory: "512Mi"
+          cpu: "500m"
+        limits:
+          memory: "1Gi"
+          cpu: "1"
+      
+      svcOrchSpec:
+        env:
+          - name: SELDON_LOG_LEVEL
+            value: "INFO"
+          - name: SELDON_HTTP_PORT
+            value: "9000"
+          - name: SELDON_GRPC_PORT
+            value: "9001"
+          - name: PREDICTIVE_UNIT_PARAMETERS
+            value: '[
+              {"name":"model_name","type":"STRING","value":"credit_scoring"},
+              {"name":"model_version","type":"STRING","value":"v1"},
+              {"name":"batch_size","type":"INT","value":"32"}
+            ]'
+
+  # Traffic management
+  traffic: 
+    - name: default
+      weight: 100
+      serviceName: credit-scoring-default
+
+  # Auto-scaling
+  hpaSpec:
+    minReplicas: 2
+    maxReplicas: 10
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: Resource
+        resource:
+          name: memory
+          target:
+            type: Utilization
+            averageUtilization: 80
+      - type: Pods
+        pods:
+          metric:
+            name: http_requests_per_second
+          target:
+            type: AverageValue
+            averageValue: "100"
+
+  # Shadow deployment для тестирования новых моделей
+  shadow:
+    enabled: true
+    trafficPercent: 10
+    predictorName: shadow-predictor
+
+  # Model metrics и monitoring
+  metrics:
+    enabled: true
+    endpoint: "http://prometheus.monitoring.svc.cluster.local:9090"
+    interval: 30s
+    portName: metrics
+---
+# Shadow predictor для тестирования новых моделей
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: credit-scoring-shadow
+  namespace: credit-scoring-production
+spec:
+  name: credit-scoring-shadow
+  protocol: kfserving
+  predictors:
+    - name: shadow-predictor
+      graph:
+        name: credit-scoring-model-shadow
+        type: MODEL
+        implementation: TRITON_SERVER
+        modelUri: "s3://models-registry-staging/credit_scoring_v2.onnx"
+        parameters:
+          - name: model_name
+            type: STRING
+            value: "credit_scoring_shadow"
+          - name: model_version
+            type: STRING
+            value: "v2"
+      componentSpecs:
+        - spec:
+            containers:
+              - name: credit-scoring-model-shadow
+                image: "nvcr.io/nvidia/tritonserver:22.12-py3"
+                args:
+                  - "tritonserver"
+                  - "--model-repository=/mnt/models"
+                  - "--http-port=9000"
+                  - "--model-control-mode=explicit"
+                volumeMounts:
+                  - name: models-volume-shadow
+                    mountPath: /mnt/models
+            initContainers:
+              - name: model-initializer-shadow
+                image: "seldonio/rclone-storage-initializer:1.14.0"
+                args:
+                  - "--action=download"
+                  - "--src_path=s3://models-registry-staging/credit_scoring_v2.onnx"
+                  - "--dest_path=/mnt/models"
+                volumeMounts:
+                  - name: models-volume-shadow
+                    mountPath: /mnt/models
+            volumes:
+              - name: models-volume-shadow
+                emptyDir: {}
+      replicas: 1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+
+  # Этот predictor получает только shadow трафик
+  shadow: true

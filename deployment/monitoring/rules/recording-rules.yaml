@@ -1,0 +1,159 @@
+groups:
+  - name: credit-scoring-recording-rules
+    interval: 30s
+    rules:
+      # HTTP metrics aggregates
+      - record: http_requests:rate5m
+        expr: rate(http_requests_total[5m])
+        labels:
+          aggregation: "rate"
+      
+      - record: http_requests:rate1h
+        expr: rate(http_requests_total[1h])
+        labels:
+          aggregation: "rate"
+      
+      - record: http_errors:rate5m
+        expr: rate(http_requests_total{status!~"2.."}[5m])
+        labels:
+          aggregation: "rate"
+      
+      - record: http_error_rate
+        expr: |
+          http_errors:rate5m{namespace="credit-scoring-production"}
+          /
+          http_requests:rate5m{namespace="credit-scoring-production"}
+          * 100
+        labels:
+          metric: "error_rate"
+      
+      # Latency percentiles
+      - record: http_request_duration_seconds:p50
+        expr: histogram_quantile(0.50, rate(http_request_duration_seconds_bucket[5m]))
+        labels:
+          percentile: "50"
+      
+      - record: http_request_duration_seconds:p95
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+        labels:
+          percentile: "95"
+      
+      - record: http_request_duration_seconds:p99
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
+        labels:
+          percentile: "99"
+      
+      # Model metrics aggregates
+      - record: model_predictions:rate5m
+        expr: rate(model_predictions_total[5m])
+        labels:
+          aggregation: "rate"
+      
+      - record: model_predictions_failed:rate5m
+        expr: rate(model_predictions_failed_total[5m])
+        labels:
+          aggregation: "rate"
+      
+      - record: model_failure_rate
+        expr: |
+          model_predictions_failed:rate5m
+          /
+          model_predictions:rate5m
+          * 100
+        labels:
+          metric: "failure_rate"
+      
+      # Resource utilization
+      - record: container_cpu_utilization
+        expr: |
+          rate(container_cpu_usage_seconds_total[5m])
+          /
+          kube_pod_container_resource_limits{resource="cpu"}
+          * 100
+        labels:
+          metric: "cpu_utilization"
+      
+      - record: container_memory_utilization
+        expr: |
+          container_memory_working_set_bytes
+          /
+          kube_pod_container_resource_limits{resource="memory"}
+          * 100
+        labels:
+          metric: "memory_utilization"
+      
+      # Business metrics
+      - record: loan_approval_rate
+        expr: |
+          sum(approved_predictions_total[1h])
+          /
+          sum(total_predictions[1h])
+          * 100
+        labels:
+          metric: "approval_rate"
+      
+      - record: high_risk_rate
+        expr: |
+          sum(high_risk_predictions_total[1h])
+          /
+          sum(total_predictions[1h])
+          * 100
+        labels:
+          metric: "high_risk_rate"
+      
+      # Data drift metrics
+      - record: data_drift_score
+        expr: |
+          avg_over_time(data_drift_metric[1h])
+        labels:
+          metric: "drift_score"
+      
+      - record: concept_drift_score
+        expr: |
+          avg_over_time(concept_drift_metric[1h])
+        labels:
+          metric: "concept_drift_score"
+      
+      # Prediction performance
+      - record: prediction_accuracy
+        expr: |
+          sum(correct_predictions_total[1h])
+          /
+          sum(total_predictions[1h])
+          * 100
+        labels:
+          metric: "accuracy"
+      
+      # Cost metrics
+      - record: cost_per_prediction
+        expr: |
+          infrastructure_cost_per_hour{service="credit-scoring-api"}
+          /
+          http_requests:rate1h * 3600
+        labels:
+          metric: "cost_per_prediction"
+      
+      # SLO metrics
+      - record: slo_availability
+        expr: |
+          avg_over_time(
+            (
+              http_requests_total{status=~"2.."}
+              /
+              http_requests_total
+            )[28d:1h]
+          ) * 100
+        labels:
+          metric: "availability_slo"
+      
+      - record: slo_latency
+        expr: |
+          avg_over_time(
+            (
+              http_request_duration_seconds_bucket{le="0.5"}
+              /
+              http_request_duration_seconds_count
+            )[28d:1h]
+          ) * 100
+        labels:
+          metric: "latency_slo"

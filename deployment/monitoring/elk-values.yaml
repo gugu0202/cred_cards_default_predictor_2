@@ -1,0 +1,426 @@
+# Elasticsearch configuration
+elasticsearch:
+  enabled: true
+  replicas: 3
+  
+  # Resources
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2"
+    limits:
+      memory: "8Gi"
+      cpu: "4"
+  
+  # Storage
+  volumeClaimTemplate:
+    accessModes: ["ReadWriteOnce"]
+    storageClassName: fast-ssd
+    resources:
+      requests:
+        storage: 100Gi
+  
+  # Configuration
+  esConfig:
+    elasticsearch.yml: |
+      cluster.name: "credit-scoring-cluster"
+      node.name: "${HOSTNAME}"
+      network.host: "0.0.0.0"
+      discovery.seed_hosts: []
+      cluster.initial_master_nodes: []
+      xpack.security.enabled: false
+      xpack.monitoring.enabled: true
+      xpack.ml.enabled: false
+      indices.query.bool.max_clause_count: 4096
+  
+  # Plugins
+  plugins: |
+    analysis-icu
+    ingest-attachment
+  
+  # Security context
+  securityContext:
+    enabled: true
+    fsGroup: 1000
+    runAsUser: 1000
+
+# Logstash configuration
+logstash:
+  enabled: true
+  replicas: 2
+  
+  # Resources
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1"
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+  
+  # Pipeline configuration
+  logstashPipeline:
+    credit-scoring-logs.conf: |
+      input {
+        # Input from Filebeat
+        beats {
+          port => 5044
+          host => "0.0.0.0"
+        }
+        
+        # Input from Kafka (for application logs)
+        kafka {
+          bootstrap_servers => "kafka:9092"
+          topics => ["credit-scoring-logs"]
+          codec => json
+        }
+      }
+      
+      filter {
+        # Parse JSON logs
+        if [message] =~ /^{.*}$/ {
+          json {
+            source => "message"
+          }
+        }
+        
+        # Parse timestamp
+        date {
+          match => ["timestamp", "ISO8601"]
+          target => "@timestamp"
+        }
+        
+        # Add metadata
+        mutate {
+          add_field => {
+            "[@metadata][index]" => "credit-scoring-logs-%{+YYYY.MM.dd}"
+            "[@metadata][type]" => "log"
+          }
+          
+          # Clean up fields
+          remove_field => ["message"]
+        }
+        
+        # Parse application specific fields
+        if [logger_name] == "credit_scoring_api" {
+          grok {
+            match => { "message" => '\[%{LOGLEVEL:loglevel}\] %{TIMESTAMP_ISO8601:timestamp} %{GREEDYDATA:log_message}' }
+          }
+          
+          # Add business context
+          if [log_message] =~ /prediction/ {
+            mutate {
+              add_tag => ["prediction"]
+            }
+          }
+          
+          if [log_message] =~ /error|exception/i {
+            mutate {
+              add_tag => ["error"]
+              add_field => { "severity" => "high" }
+            }
+          }
+        }
+        
+        # GeoIP for client IPs
+        if [client_ip] {
+          geoip {
+            source => "client_ip"
+            target => "geoip"
+          }
+        }
+        
+        # User agent parsing
+        if [user_agent] {
+          useragent {
+            source => "user_agent"
+            target => "user_agent_info"
+          }
+        }
+        
+        # Drop debug logs in production
+        if [loglevel] == "DEBUG" and [environment] == "production" {
+          drop {}
+        }
+      }
+      
+      output {
+        # Output to Elasticsearch
+        elasticsearch {
+          hosts => ["http://elasticsearch-master:9200"]
+          index => "%{[@metadata][index]}"
+          document_type => "%{[@metadata][type]}"
+          user => "${ELASTIC_USER}"
+          password => "${ELASTIC_PASSWORD}"
+        }
+        
+        # Output for errors to Slack
+        if "error" in [tags] {
+          http {
+            url => "${SLACK_WEBHOOK_URL}"
+            http_method => "post"
+            format => "json"
+            json => {
+              "text" => "Error detected in credit-scoring-api: %{log_message}"
+              "attachments" => [
+                {
+                  "color" => "#ff0000",
+                  "fields" => [
+                    {
+                      "title" => "Environment",
+                      "value" => "%{environment}",
+                      "short" => true
+                    },
+                    {
+                      "title" => "Log Level",
+                      "value" => "%{loglevel}",
+                      "short" => true
+                    },
+                    {
+                      "title" => "Message",
+                      "value" => "%{log_message}",
+                      "short" => false
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        
+        # Output to console for debugging
+        stdout {
+          codec => rubydebug
+        }
+      }
+  
+  # Environment variables
+  env:
+    - name: "ELASTIC_USER"
+      valueFrom:
+        secretKeyRef:
+          name: "elastic-credentials"
+          key: "username"
+    - name: "ELASTIC_PASSWORD"
+      valueFrom:
+        secretKeyRef:
+          name: "elastic-credentials"
+          key: "password"
+    - name: "SLACK_WEBHOOK_URL"
+      valueFrom:
+        secretKeyRef:
+          name: "slack-webhook"
+          key: "url"
+
+# Kibana configuration
+kibana:
+  enabled: true
+  replicas: 2
+  
+  # Resources
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "0.5"
+    limits:
+      memory: "2Gi"
+      cpu: "1"
+  
+  # Configuration
+  kibanaConfig:
+    kibana.yml: |
+      server.name: kibana
+      server.host: "0.0.0.0"
+      elasticsearch.hosts: ["http://elasticsearch-master:9200"]
+      elasticsearch.username: "${ELASTIC_USER}"
+      elasticsearch.password: "${ELASTIC_PASSWORD}"
+      monitoring.ui.container.elasticsearch.enabled: true
+      xpack.security.enabled: false
+      xpack.fleet.enabled: true
+      xpack.reporting.enabled: true
+  
+  # Saved objects (dashboards, visualizations)
+  savedObjects:
+    enabled: true
+    path: "/usr/share/kibana/saved_objects"
+    objects:
+      - name: "credit-scoring-dashboard"
+        file: "credit-scoring-dashboard.ndjson"
+      - name: "error-analysis"
+        file: "error-analysis.ndjson"
+      - name: "performance-metrics"
+        file: "performance-metrics.ndjson"
+
+# Filebeat for collecting logs
+filebeat:
+  enabled: true
+  
+  filebeatConfig:
+    filebeat.yml: |
+      filebeat.inputs:
+        - type: container
+          paths:
+            - /var/log/containers/*credit-scoring*.log
+          processors:
+            - add_kubernetes_metadata:
+                host: ${NODE_NAME}
+                matchers:
+                  - logs_path:
+                      logs_path: "/var/log/containers/"
+            - decode_json_fields:
+                fields: ["message"]
+                target: "json"
+                overwrite_keys: true
+        
+        - type: container
+          paths:
+            - /var/log/containers/*.log
+          exclude_files: ['credit-scoring']
+          enabled: false
+        
+        # System logs
+        - type: log
+          enabled: true
+          paths:
+            - /var/log/messages
+            - /var/log/syslog
+        
+        # Application logs from files
+        - type: log
+          paths:
+            - /var/log/credit-scoring/*.log
+          fields:
+            application: "credit-scoring"
+            environment: "${ENVIRONMENT}"
+      
+      output.logstash:
+        hosts: ["logstash-logstash:5044"]
+      
+      setup.kibana:
+        host: "kibana-kibana:5601"
+      
+      setup.dashboards.enabled: true
+      setup.ilm.enabled: false
+  
+  # DaemonSet for running on each node
+  daemonset:
+    enabled: true
+    extraEnv:
+      - name: ENVIRONMENT
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.labels['environment']
+
+# Metricbeat for collecting metrics
+metricbeat:
+  enabled: true
+  
+  metricbeatConfig:
+    metricbeat.yml: |
+      metricbeat.modules:
+        - module: kubernetes
+          metricsets:
+            - container
+            - node
+            - pod
+            - system
+            - volume
+          period: 30s
+          hosts: ["https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"]
+          bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+          ssl.verification_mode: "none"
+        
+        - module: prometheus
+          metricsets: ["collector"]
+          period: 30s
+          hosts: ["http://prometheus-operated:9090"]
+        
+        - module: elasticsearch
+          metricsets:
+            - node
+            - node_stats
+          period: 10s
+          hosts: ["http://elasticsearch-master:9200"]
+        
+        - module: kibana
+          metricsets: ["stats"]
+          period: 10s
+          hosts: ["http://kibana-kibana:5601"]
+      
+      output.elasticsearch:
+        hosts: ["elasticsearch-master:9200"]
+        username: "${ELASTIC_USER}"
+        password: "${ELASTIC_PASSWORD}"
+      
+      setup.kibana:
+        host: "kibana-kibana:5601"
+  
+  daemonset:
+    enabled: true
+
+# Curator for index management
+curator:
+  enabled: true
+  
+  configMaps:
+    config_yml: |
+      client:
+        hosts:
+          - elasticsearch-master
+        port: 9200
+        use_ssl: False
+    
+    action_file_yml: |
+      actions:
+        1:
+          action: delete_indices
+          description: "Delete indices older than 30 days"
+          options:
+            timeout_override: 300
+            ignore_empty_list: True
+            disable_action: False
+          filters:
+            - filtertype: pattern
+              kind: prefix
+              value: credit-scoring-
+            - filtertype: age
+              source: creation_date
+              direction: older
+              unit: days
+              unit_count: 30
+        
+        2:
+          action: forcemerge
+          description: "Force merge indices older than 7 days"
+          options:
+            max_num_segments: 1
+            timeout_override: 300
+            delay: 120
+          filters:
+            - filtertype: pattern
+              kind: prefix
+              value: credit-scoring-
+            - filtertype: age
+              source: creation_date
+              direction: older
+              unit: days
+              unit_count: 7
+        
+        3:
+          action: close
+          description: "Close indices older than 90 days"
+          options:
+            timeout_override: 300
+          filters:
+            - filtertype: pattern
+              kind: prefix
+              value: credit-scoring-
+            - filtertype: age
+              source: creation_date
+              direction: older
+              unit: days
+              unit_count: 90
+  
+  cron:
+    enabled: true
+    schedule: "0 1 * * *"  # Daily at 1 AM

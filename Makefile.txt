@@ -1,0 +1,239 @@
+.PHONY: help build push deploy test clean
+
+# Variables
+REGISTRY ?= registry.yandexcloud.net
+PROJECT ?= credit-scoring
+ENVIRONMENT ?= dev
+IMAGE_TAG ?= latest
+KUBE_NAMESPACE ?= credit-scoring-$(ENVIRONMENT)
+
+# Docker images
+API_IMAGE = $(REGISTRY)/$(PROJECT)/credit-scoring-api:$(IMAGE_TAG)
+TRAINING_IMAGE = $(REGISTRY)/$(PROJECT)/credit-scoring-training:$(IMAGE_TAG)
+MONITORING_IMAGE = $(REGISTRY)/$(PROJECT)/credit-scoring-monitoring:$(IMAGE_TAG)
+
+# Kubernetes context
+KUBE_CONTEXT ?= $(PROJECT)-$(ENVIRONMENT)
+
+# Help
+help:
+	@echo "Available commands:"
+	@echo "  make build-api          - Build API Docker image"
+	@echo "  make build-training     - Build training Docker image"
+	@echo "  make build-all          - Build all Docker images"
+	@echo "  make push-api           - Push API image to registry"
+	@echo "  make push-all           - Push all images to registry"
+	@echo "  make deploy-infra       - Deploy infrastructure with Terraform"
+	@echo "  make deploy-api         - Deploy API to Kubernetes"
+	@echo "  make deploy-monitoring  - Deploy monitoring stack"
+	@echo "  make deploy-all         - Deploy everything"
+	@echo "  make test-api           - Run API tests"
+	@echo "  test-integration        - Run integration tests"
+	@echo "  make lint               - Lint code"
+	@echo "  make format             - Format code"
+	@echo "  make clean              - Clean build artifacts"
+	@echo ""
+	@echo "Environment variables:"
+	@echo "  ENVIRONMENT=dev|staging|prod (default: dev)"
+	@echo "  IMAGE_TAG=tag (default: latest)"
+
+# Docker builds
+build-api:
+	@echo "Building API Docker image..."
+	docker build \
+		-f deployment/docker/Dockerfile.api \
+		-t $(API_IMAGE) \
+		--build-arg DVC_REMOTE_URL="$$DVC_REMOTE_URL" \
+		--build-arg DVC_REMOTE_AWS_ACCESS_KEY_ID="$$DVC_REMOTE_AWS_ACCESS_KEY_ID" \
+		--build-arg DVC_REMOTE_AWS_SECRET_ACCESS_KEY="$$DVC_REMOTE_AWS_SECRET_ACCESS_KEY" \
+		.
+
+build-training:
+	@echo "Building training Docker image..."
+	docker build \
+		-f deployment/docker/Dockerfile.training \
+		-t $(TRAINING_IMAGE) \
+		.
+
+build-monitoring:
+	@echo "Building monitoring Docker image..."
+	docker build \
+		-f deployment/docker/Dockerfile.monitoring \
+		-t $(MONITORING_IMAGE) \
+		.
+
+build-all: build-api build-training build-monitoring
+
+# Docker push
+push-api:
+	@echo "Pushing API image to registry..."
+	docker push $(API_IMAGE)
+
+push-training:
+	@echo "Pushing training image to registry..."
+	docker push $(TRAINING_IMAGE)
+
+push-monitoring:
+	@echo "Pushing monitoring image to registry..."
+	docker push $(MONITORING_IMAGE)
+
+push-all: push-api push-training push-monitoring
+
+# Terraform
+deploy-infra:
+	@echo "Deploying infrastructure with Terraform..."
+	cd infrastructure/environments/$(ENVIRONMENT) && \
+	terraform init && \
+	terraform plan && \
+	terraform apply -auto-approve
+
+destroy-infra:
+	@echo "Destroying infrastructure..."
+	cd infrastructure/environments/$(ENVIRONMENT) && \
+	terraform destroy -auto-approve
+
+# Kubernetes deployment
+deploy-api:
+	@echo "Deploying API to Kubernetes..."
+	kubectl config use-context $(KUBE_CONTEXT)
+	
+	# Create namespace if not exists
+	kubectl create namespace $(KUBE_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	
+	# Apply ConfigMaps and Secrets
+	kubectl apply -f deployment/kubernetes/configmap.yaml -n $(KUBE_NAMESPACE)
+	kubectl apply -f deployment/kubernetes/secrets.yaml -n $(KUBE_NAMESPACE)
+	
+	# Apply PVC
+	kubectl apply -f deployment/kubernetes/pvc.yaml -n $(KUBE_NAMESPACE)
+	
+	# Apply Deployment
+	kubectl apply -f deployment/kubernetes/api-deployment.yaml -n $(KUBE_NAMESPACE)
+	
+	# Apply Service
+	kubectl apply -f deployment/kubernetes/api-service.yaml -n $(KUBE_NAMESPACE)
+	
+	# Apply HPA
+	kubectl apply -f deployment/kubernetes/hpa.yaml -n $(KUBE_NAMESPACE)
+	
+	# Apply Ingress (if enabled)
+	if [ -f "deployment/kubernetes/ingress.yaml" ]; then \
+		kubectl apply -f deployment/kubernetes/ingress.yaml -n $(KUBE_NAMESPACE); \
+	fi
+	
+	@echo "Waiting for deployment to be ready..."
+	kubectl rollout status deployment/credit-scoring-api -n $(KUBE_NAMESPACE) --timeout=300s
+
+deploy-monitoring:
+	@echo "Deploying monitoring stack..."
+	kubectl config use-context $(KUBE_CONTEXT)
+	
+	# Create monitoring namespace
+	kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+	
+	# Deploy Prometheus stack
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update
+	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		-n monitoring \
+		-f deployment/monitoring/prometheus-values.yaml
+	
+	# Deploy Loki
+	helm repo add grafana https://grafana.github.io/helm-charts
+	helm upgrade --install loki grafana/loki \
+		-n monitoring \
+		-f deployment/monitoring/loki-values.yaml
+	
+	# Deploy Grafana dashboards
+	kubectl apply -f deployment/monitoring/dashboards/ -n monitoring
+
+deploy-training:
+	@echo "Deploying training job..."
+	kubectl config use-context $(KUBE_CONTEXT)
+	kubectl apply -f deployment/kubernetes/training-job.yaml -n ml-training
+
+deploy-all: deploy-infra deploy-monitoring deploy-api
+
+# Testing
+test-api:
+	@echo "Running API tests..."
+	python -m pytest tests/unit/api/ -v --cov=api --cov-report=html
+
+test-integration:
+	@echo "Running integration tests..."
+	python -m pytest tests/integration/ -v
+
+test-load:
+	@echo "Running load tests..."
+	python scripts/performance/load_testing.py
+
+test-all: test-api test-integration
+
+# Code quality
+lint:
+	@echo "Linting code..."
+	flake8 api/ scripts/ tests/
+	black --check api/ scripts/ tests/
+	mypy api/
+
+format:
+	@echo "Formatting code..."
+	black api/ scripts/ tests/
+	isort api/ scripts/ tests/
+
+# Cleanup
+clean:
+	@echo "Cleaning build artifacts..."
+	rm -rf .pytest_cache/ .coverage htmlcov/
+	find . -name "*.pyc" -delete
+	find . -name "__pycache__" -delete
+	docker system prune -f
+
+# Utilities
+logs:
+	@echo "Showing API logs..."
+	kubectl logs -f deployment/credit-scoring-api -n $(KUBE_NAMESPACE)
+
+port-forward:
+	@echo "Port forwarding to API..."
+	kubectl port-forward service/credit-scoring-service 8000:80 -n $(KUBE_NAMESPACE)
+
+status:
+	@echo "Kubernetes status:"
+	kubectl get pods,svc,ingress,hpa -n $(KUBE_NAMESPACE)
+
+get-url:
+	@echo "API URL:"
+	@kubectl get service credit-scoring-service -n $(KUBE_NAMESPACE) -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+
+# Database
+migrate-db:
+	@echo "Running database migrations..."
+	python scripts/utils/database_migrate.py
+
+# Model management
+update-model:
+	@echo "Updating model..."
+	python scripts/model_training/train_nn_model.py
+	python scripts/model_training/onnx_conversion.py
+	python scripts/optimization/quantization.py
+
+# Environment setup
+setup-dev:
+	@echo "Setting up development environment..."
+	pip install -r requirements.txt -r requirements-dev.txt
+	pre-commit install
+	docker-compose up -d
+
+teardown-dev:
+	@echo "Tearing down development environment..."
+	docker-compose down -v
+
+# Production
+prod-deploy:
+	@echo "Production deployment..."
+	ENVIRONMENT=prod IMAGE_TAG=$$(git rev-parse --short HEAD) make deploy-all
+
+rollback:
+	@echo "Rolling back deployment..."
+	kubectl rollout undo deployment/credit-scoring-api -n $(KUBE_NAMESPACE)
