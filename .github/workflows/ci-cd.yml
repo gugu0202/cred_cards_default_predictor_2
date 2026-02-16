@@ -1,0 +1,597 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'api/**'
+      - 'scripts/**'
+      - 'requirements*.txt'
+      - 'deployment/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'  # Ежедневно в 2 AM
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KUBE_NAMESPACE: credit-scoring-${{ github.ref_name == 'main' && 'production' || 'staging' }}
+  HELM_RELEASE: credit-scoring-${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+
+jobs:
+  # 1. Linting и статический анализ
+  lint-and-analyze:
+    name: Linting & Static Analysis
+    runs-on: ubuntu-latest
+    outputs:
+      quality_score: ${{ steps.quality.outputs.score }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install black flake8 mypy bandit safety pylint
+
+    - name: Black code formatting check
+      run: black --check api/ scripts/ tests/
+
+    - name: Flake8 linting
+      run: flake8 api/ scripts/ tests/ --count --max-complexity=10 --max-line-length=88 --statistics
+
+    - name: MyPy type checking
+      run: mypy api/ --ignore-missing-imports --strict
+
+    - name: Bandit security scanning
+      run: bandit -r api/ -ll
+
+    - name: Safety dependency check
+      run: safety check -r requirements.txt -r requirements-api.txt
+
+    - name: Pylint analysis
+      run: pylint api/ --fail-under=8.0
+
+    - name: Calculate quality score
+      id: quality
+      run: |
+        # Простая оценка качества кода
+        SCORE=100
+        
+        # Проверяем результаты линтеров
+        if black --check api/ scripts/ tests/ 2>/dev/null; then
+          echo "Black passed"
+        else
+          SCORE=$((SCORE - 10))
+        fi
+        
+        if flake8 api/ scripts/ tests/ --quiet 2>/dev/null; then
+          echo "Flake8 passed"
+        else
+          SCORE=$((SCORE - 10))
+        fi
+        
+        echo "score=$SCORE" >> $GITHUB_OUTPUT
+
+  # 2. Unit и интеграционные тесты
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-analyze
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+        pip install pytest pytest-cov pytest-asyncio pytest-mock
+
+    - name: Run unit tests
+      run: |
+        python -m pytest tests/unit/ \
+          -v \
+          --cov=api \
+          --cov=scripts \
+          --cov-report=xml \
+          --cov-report=html \
+          --junitxml=junit.xml
+
+    - name: Run integration tests
+      run: |
+        python -m pytest tests/integration/ \
+          -v \
+          --cov-append \
+          --cov-report=xml \
+          --junitxml=junit-integration.xml
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-${{ matrix.python-version }}
+        path: |
+          junit.xml
+          junit-integration.xml
+          htmlcov/
+
+  # 3. Security scanning
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: lint-and-analyze
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'ghcr.io/${{ github.repository }}/api:latest'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Run Snyk security scan
+      uses: snyk/actions/python@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+    - name: Run Hadolint for Dockerfile security
+      uses: hadolint/hadolint-action@v3.0.0
+      with:
+        dockerfile: deployment/docker/Dockerfile.api
+
+    - name: Run KubeSec for Kubernetes manifests
+      uses: controlplaneio/kubectl-action@master
+      with:
+        args: kubesec scan deployment/kubernetes/
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          trivy-results.sarif
+          snyk-report.json
+
+    - name: Upload SARIF results to GitHub
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # 4. Build и push Docker образов
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata for Docker
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=schedule
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-,format=short
+
+    - name: Build and push API image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: deployment/docker/Dockerfile.api
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}-api
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          DVC_REMOTE_URL=${{ secrets.DVC_REMOTE_URL }}
+          DVC_REMOTE_AWS_ACCESS_KEY_ID=${{ secrets.DVC_REMOTE_AWS_ACCESS_KEY_ID }}
+          DVC_REMOTE_AWS_SECRET_ACCESS_KEY=${{ secrets.DVC_REMOTE_AWS_SECRET_ACCESS_KEY }}
+
+    - name: Build and push training image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: deployment/docker/Dockerfile.training
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}-training
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Scan built images with Trivy
+      run: |
+        trivy image --format template --template "@contrib/sarif.tpl" -o trivy-image-results.sarif \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tags }}-api
+        trivy image --format template --template "@contrib/sarif.tpl" -o trivy-training-results.sarif \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tags }}-training
+
+  # 5. Деплой в staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Set up Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBECONFIG_STAGING }}
+
+    - name: Deploy with Helm
+      uses: azure/k8s-deploy@v4
+      with:
+        namespace: ${{ env.KUBE_NAMESPACE }}
+        manifests: |
+          deployment/kubernetes/namespace.yaml
+          deployment/kubernetes/configmap.yaml
+          deployment/kubernetes/secrets.yaml
+          deployment/kubernetes/pvc.yaml
+          deployment/kubernetes/api-deployment.yaml
+          deployment/kubernetes/api-service.yaml
+          deployment/kubernetes/hpa.yaml
+        images: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-api
+        imagepullsecrets: |
+          regcred
+
+    - name: Wait for deployment
+      run: |
+        kubectl rollout status deployment/credit-scoring-api \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          --timeout=300s
+
+    - name: Run smoke tests
+      run: |
+        API_URL=$(kubectl get service credit-scoring-service \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        curl -f http://$API_URL/health
+        curl -f http://$API_URL/docs
+        python scripts/tests/smoke-test.py --url http://$API_URL
+
+    - name: Run performance tests
+      run: |
+        API_URL=$(kubectl get service credit-scoring-service \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        python scripts/performance/load_testing.py \
+          --url http://$API_URL/predict \
+          --requests 1000 \
+          --concurrency 10
+
+  # 6. Деплой в production с canary release
+  deploy-production:
+    name: Deploy to Production (Canary)
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Set up Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBECONFIG_PRODUCTION }}
+
+    - name: Deploy canary release
+      run: |
+        # Создаем canary deployment
+        kubectl apply -f deployment/kubernetes/canary-deployment.yaml \
+          -n ${{ env.KUBE_NAMESPACE }}
+        
+        # Ждем пока canary pod запустится
+        kubectl rollout status deployment/credit-scoring-api-canary \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          --timeout=120s
+        
+        # Тестируем canary
+        CANARY_POD=$(kubectl get pods -n ${{ env.KUBE_NAMESPACE }} \
+          -l app=credit-scoring-api-canary \
+          -o jsonpath='{.items[0].metadata.name}')
+        
+        kubectl exec $CANARY_POD -n ${{ env.KUBE_NAMESPACE }} -- \
+          curl -f http://localhost:8000/health
+
+    - name: Run canary tests
+      run: |
+        python scripts/tests/canary-test.py \
+          --canary-url http://credit-scoring-api-canary.${{ env.KUBE_NAMESPACE }}.svc.cluster.local:8000 \
+          --stable-url http://credit-scoring-service.${{ env.KUBE_NAMESPACE }}.svc.cluster.local:80
+
+    - name: Gradual traffic shift
+      run: |
+        # Постепенно увеличиваем трафик на canary
+        for percentage in 10 25 50 75 100; do
+          echo "Shifting $percentage% traffic to canary..."
+          
+          # Обновляем Istio VirtualService (если используется)
+          if kubectl get virtualservice credit-scoring -n ${{ env.KUBE_NAMESPACE }}; then
+            sed "s/WEIGHT_PERCENTAGE/$percentage/g" \
+              deployment/istio/canary-virtual-service.yaml.template | \
+              kubectl apply -n ${{ env.KUBE_NAMESPACE }} -f -
+          fi
+          
+          # Ждем и мониторим метрики
+          sleep 60
+          
+          # Проверяем метрики ошибок
+          ERROR_RATE=$(kubectl exec -n monitoring \
+            $(kubectl get pods -n monitoring -l app=prometheus -o jsonpath='{.items[0].metadata.name}') \
+            -- wget -qO- "http://localhost:9090/api/v1/query?query=rate(http_requests_total{status!~\"2..\"}[1m])/rate(http_requests_total[1m])*100" | \
+            jq '.data.result[0].value[1]' | tr -d '"')
+          
+          if (( $(echo "$ERROR_RATE > 1.0" | bc -l) )); then
+            echo "Error rate too high: $ERROR_RATE%. Rolling back..."
+            exit 1
+          fi
+          
+          echo "Canary performing well with $percentage% traffic"
+        done
+
+    - name: Promote canary to stable
+      run: |
+        # Обновляем основной deployment
+        kubectl set image deployment/credit-scoring-api \
+          api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-api \
+          -n ${{ env.KUBE_NAMESPACE }}
+        
+        kubectl rollout status deployment/credit-scoring-api \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          --timeout=300s
+        
+        # Удаляем canary deployment
+        kubectl delete deployment credit-scoring-api-canary \
+          -n ${{ env.KUBE_NAMESPACE }}
+        
+        # Возвращаем весь трафик на основной deployment
+        kubectl apply -f deployment/istio/virtual-service.yaml \
+          -n ${{ env.KUBE_NAMESPACE }}
+
+    - name: Verify production deployment
+      run: |
+        API_URL=$(kubectl get service credit-scoring-service \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        # Комплексная проверка
+        python scripts/tests/smoke-test.py --url http://$API_URL
+        python scripts/tests/performance-test.py --url http://$API_URL/predict
+        
+        # Проверка метрик
+        curl -f http://$API_URL/metrics | grep -q "http_requests_total"
+
+  # 7. Мониторинг и алертинг
+  monitor-and-alert:
+    name: Monitoring & Alerting
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: always()
+    
+    steps:
+    - name: Check deployment health
+      run: |
+        if [ "${{ needs.deploy-production.result }}" == "success" ]; then
+          echo "Deployment successful, checking health metrics..."
+          
+          # Получаем метрики из Prometheus
+          python scripts/monitoring/check_metrics.py \
+            --prometheus-url ${{ secrets.PROMETHEUS_URL }} \
+            --threshold 95
+          
+          # Отправляем уведомление в Slack
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"✅ Production deployment successful!\nCommit: ${{ github.sha }}\nDeployer: ${{ github.actor }}\nURL: http://api.credit-scoring.example.com"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+        elif [ "${{ needs.deploy-production.result }}" == "failure" ]; then
+          echo "Deployment failed, sending alert..."
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"🚨 Production deployment failed!\nCommit: ${{ github.sha }}\nDeployer: ${{ github.actor }}\nJob: ${{ github.job }}\nWorkflow: ${{ github.workflow }}"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+          # Создаем инцидент в PagerDuty
+          curl -X POST ${{ secrets.PAGERDUTY_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d '{
+              "routing_key": "${{ secrets.PAGERDUTY_ROUTING_KEY }}",
+              "event_action": "trigger",
+              "payload": {
+                "summary": "CI/CD Pipeline Failure",
+                "source": "github-actions",
+                "severity": "critical",
+                "component": "credit-scoring-api",
+                "group": "deployment"
+              }
+            }'
+        fi
+
+    - name: Generate deployment report
+      if: always()
+      run: |
+        python scripts/monitoring/generate_deployment_report.py \
+          --commit ${{ github.sha }} \
+          --actor ${{ github.actor }} \
+          --branch ${{ github.ref }} \
+          --workflow ${{ github.workflow }} \
+          --results "${{ toJson(needs) }}" \
+          --output deployment-report.json
+        
+        # Загружаем отчет как артефакт
+        echo "DEPLOYMENT_REPORT=$(cat deployment-report.json | jq -c .)" >> $GITHUB_ENV
+
+    - name: Upload deployment report
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-report
+        path: deployment-report.json
+
+  # 8. Откат при необходимости
+  rollback:
+    name: Rollback if needed
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production, monitor-and-alert]
+    if: failure() && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Set Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ github.ref == 'refs/heads/main' && secrets.KUBECONFIG_PRODUCTION || secrets.KUBECONFIG_STAGING }}
+
+    - name: Rollback deployment
+      run: |
+        echo "Rolling back deployment due to pipeline failure..."
+        
+        # Откатываем deployment на предыдущую версию
+        kubectl rollout undo deployment/credit-scoring-api \
+          -n ${{ env.KUBE_NAMESPACE }}
+        
+        kubectl rollout status deployment/credit-scoring-api \
+          -n ${{ env.KUBE_NAMESPACE }} \
+          --timeout=300s
+        
+        echo "Rollback completed successfully"
+        
+        # Отправляем уведомление
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"🔄 Rollback performed for ${{ env.KUBE_NAMESPACE }}\nReason: Pipeline failure\nPrevious commit: ${{ github.sha }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+
+# Кастомные нотификации
+notifications:
+  runs-on: ubuntu-latest
+  needs: [lint-and-analyze, test, security-scan, build-and-push, deploy-staging, deploy-production]
+  if: always()
+  
+  steps:
+  - name: Send summary notification
+    run: |
+      STATUS_MESSAGE=""
+      
+      if [ "${{ needs.lint-and-analyze.result }}" == "success" ]; then
+        STATUS_MESSAGE="${STATUS_MESSAGE}✓ Linting & Analysis\n"
+      else
+        STATUS_MESSAGE="${STATUS_MESSAGE}✗ Linting & Analysis\n"
+      fi
+      
+      if [ "${{ needs.test.result }}" == "success" ]; then
+        STATUS_MESSAGE="${STATUS_MESSAGE}✓ Testing\n"
+      else
+        STATUS_MESSAGE="${STATUS_MESSAGE}✗ Testing\n"
+      fi
+      
+      if [ "${{ needs.security-scan.result }}" == "success" ]; then
+        STATUS_MESSAGE="${STATUS_MESSAGE}✓ Security Scanning\n"
+      else
+        STATUS_MESSAGE="${STATUS_MESSAGE}✗ Security Scanning\n"
+      fi
+      
+      if [ "${{ needs.build-and-push.result }}" == "success" ]; then
+        STATUS_MESSAGE="${STATUS_MESSAGE}✓ Build & Push\n"
+      else
+        STATUS_MESSAGE="${STATUS_MESSAGE}✗ Build & Push\n"
+      fi
+      
+      if [ "${{ needs.deploy-staging.result }}" == "success" ]; then
+        STATUS_MESSAGE="${STATUS_MESSAGE}✓ Staging Deployment\n"
+      else
+        STATUS_MESSAGE="${STATUS_MESSAGE}✗ Staging Deployment\n"
+      fi
+      
+      if [ "${{ needs.deploy-production.result }}" == "success" ]; then
+        STATUS_MESSAGE="${STATUS_MESSAGE}✓ Production Deployment\n"
+      else
+        STATUS_MESSAGE="${STATUS_MESSAGE}✗ Production Deployment\n"
+      fi
+      
+      OVERALL="FAILURE"
+      if [ "${{ job.status }}" == "success" ]; then
+        OVERALL="SUCCESS"
+      fi
+      
+      curl -X POST -H 'Content-type: application/json' \
+        --data "{\"text\":\"CI/CD Pipeline Summary ($OVERALL):\n\n$STATUS_MESSAGE\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref }}\"}" \
+        ${{ secrets.SLACK_WEBHOOK_URL }}
