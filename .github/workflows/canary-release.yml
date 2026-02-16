@@ -1,0 +1,307 @@
+name: Canary Release Management
+
+on:
+  workflow_dispatch:
+    inputs:
+      percentage:
+        description: 'Traffic percentage for canary'
+        required: true
+        default: '10'
+        type: choice
+        options:
+        - '5'
+        - '10'
+        - '25'
+        - '50'
+      image_tag:
+        description: 'Docker image tag for canary'
+        required: true
+        default: 'latest'
+      duration:
+        description: 'Canary duration in minutes'
+        required: true
+        default: '30'
+        type: choice
+        options:
+        - '15'
+        - '30'
+        - '60'
+        - '120'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KUBE_NAMESPACE: credit-scoring-production
+
+jobs:
+  deploy-canary:
+    name: Deploy Canary
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Set up Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBECONFIG_PRODUCTION }}
+
+    - name: Deploy canary deployment
+      run: |
+        # Создаем или обновляем canary deployment
+        sed -e "s|{{IMAGE_TAG}}|${{ github.event.inputs.image_tag }}|g" \
+            -e "s|{{TRAFFIC_PERCENTAGE}}|${{ github.event.inputs.percentage }}|g" \
+            deployment/kubernetes/canary-deployment.yaml.template | \
+            kubectl apply -n ${{ env.KUBE_NAMESPACE }} -f -
+        
+        echo "Canary deployment created with ${{ github.event.inputs.percentage }}% traffic"
+
+    - name: Configure Istio for canary routing
+      run: |
+        # Настраиваем VirtualService для canary
+        sed -e "s|{{CANARY_PERCENTAGE}}|${{ github.event.inputs.percentage }}|g" \
+            deployment/istio/canary-virtual-service.yaml.template | \
+            kubectl apply -n ${{ env.KUBE_NAMESPACE }} -f -
+        
+        echo "Istio routing configured for canary"
+
+    - name: Monitor canary metrics
+      run: |
+        echo "Monitoring canary for ${{ github.event.inputs.duration }} minutes..."
+        
+        # Мониторим метрики во время canary
+        python scripts/monitoring/monitor_canary.py \
+          --duration ${{ github.event.inputs.duration }} \
+          --error-threshold 2.0 \
+          --latency-threshold 100 \
+          --prometheus-url ${{ secrets.PROMETHEUS_URL }}
+
+    - name: Send canary status notification
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{
+            "text": "🚀 Canary Release Deployed",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Canary Release Status*"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Traffic:*\n${{ github.event.inputs.percentage }}%"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Duration:*\n${{ github.event.inputs.duration }} minutes"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Image Tag:*\n${{ github.event.inputs.image_tag }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Namespace:*\n${{ env.KUBE_NAMESPACE }}"
+                  }
+                ]
+              }
+            ]
+          }' \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  evaluate-canary:
+    name: Evaluate Canary Performance
+    runs-on: ubuntu-latest
+    needs: deploy-canary
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run canary evaluation tests
+      run: |
+        python scripts/tests/canary-evaluation.py \
+          --canary-endpoint http://credit-scoring-api-canary.${{ env.KUBE_NAMESPACE }}.svc.cluster.local:8000 \
+          --stable-endpoint http://credit-scoring-service.${{ env.KUBE_NAMESPACE }}.svc.cluster.local:80 \
+          --requests 1000 \
+          --error-threshold 1.0 \
+          --latency-threshold 50
+
+    - name: Analyze metrics
+      run: |
+        # Собираем и анализируем метрики canary
+        CANARY_METRICS=$(python scripts/monitoring/collect_canary_metrics.py \
+          --namespace ${{ env.KUBE_NAMESPACE }} \
+          --duration ${{ github.event.inputs.duration }})
+        
+        echo "CANARY_METRICS=$CANARY_METRICS" >> $GITHUB_ENV
+
+    - name: Make promotion decision
+      id: decision
+      run: |
+        # Автоматическое решение на основе метрик
+        ERROR_RATE=$(echo "${{ env.CANARY_METRICS }}" | jq -r '.error_rate')
+        LATENCY_P95=$(echo "${{ env.CANARY_METRICS }}" | jq -r '.latency_p95')
+        THROUGHPUT=$(echo "${{ env.CANARY_METRICS }}" | jq -r '.throughput')
+        
+        if (( $(echo "$ERROR_RATE < 1.0" | bc -l) )) && \
+           (( $(echo "$LATENCY_P95 < 100" | bc -l) )) && \
+           (( $(echo "$THROUGHPUT > 100" | bc -l) )); then
+          echo "decision=promote" >> $GITHUB_OUTPUT
+          echo "status=✅ Canary passed all checks" >> $GITHUB_OUTPUT
+        else
+          echo "decision=rollback" >> $GITHUB_OUTPUT
+          echo "status=❌ Canary failed checks: Error rate=$ERROR_RATE%, Latency p95=$LATENCY_P95ms, Throughput=$THROUGHPUT RPS" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Send evaluation results
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"text\": \"Canary Evaluation Results\",
+            \"blocks\": [
+              {
+                \"type\": \"section\",
+                \"text\": {
+                  \"type\": \"mrkdwn\",
+                  \"text\": \"*Canary Evaluation Complete*\"
+                }
+              },
+              {
+                \"type\": \"section\",
+                \"text\": {
+                  \"type\": \"mrkdwn\",
+                  \"text\": \"${{ steps.decision.outputs.status }}\"
+                }
+              },
+              {
+                \"type\": \"section\",
+                \"text\": {
+                  \"type\": \"mrkdwn\",
+                  \"text\": \"*Decision:* ${{ steps.decision.outputs.decision }}\"
+                }
+              }
+            ]
+          }" \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  promote-or-rollback:
+    name: Promote or Rollback Canary
+    runs-on: ubuntu-latest
+    needs: evaluate-canary
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Set up Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBECONFIG_PRODUCTION }}
+
+    - name: Execute decision
+      run: |
+        if [ "${{ needs.evaluate-canary.outputs.decision }}" == "promote" ]; then
+          echo "Promoting canary to stable..."
+          
+          # Обновляем основной deployment с образом canary
+          kubectl set image deployment/credit-scoring-api \
+            api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.image_tag }} \
+            -n ${{ env.KUBE_NAMESPACE }}
+          
+          kubectl rollout status deployment/credit-scoring-api \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            --timeout=300s
+          
+          # Возвращаем весь трафик на основной deployment
+          kubectl apply -f deployment/istio/virtual-service.yaml \
+            -n ${{ env.KUBE_NAMESPACE }}
+          
+          # Удаляем canary deployment
+          kubectl delete deployment credit-scoring-api-canary \
+            -n ${{ env.KUBE_NAMESPACE }}
+          
+          echo "✅ Canary successfully promoted to stable"
+          
+        else
+          echo "Rolling back canary..."
+          
+          # Удаляем canary deployment
+          kubectl delete deployment credit-scoring-api-canary \
+            -n ${{ env.KUBE_NAMESPACE }}
+          
+          # Возвращаем весь трафик на основной deployment
+          kubectl apply -f deployment/istio/virtual-service.yaml \
+            -n ${{ env.KUBE_NAMESPACE }}
+          
+          echo "✅ Canary rolled back successfully"
+        fi
+
+    - name: Send final notification
+      run: |
+        DECISION=${{ needs.evaluate-canary.outputs.decision }}
+        
+        if [ "$DECISION" == "promote" ]; then
+          MESSAGE="🎉 *Canary Successfully Promoted to Production*"
+          COLOR="#36a64f"
+        else
+          MESSAGE="🔄 *Canary Rolled Back*"
+          COLOR="#ff0000"
+        fi
+        
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"attachments\": [
+              {
+                \"color\": \"$COLOR\",
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"$MESSAGE\"
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"fields\": [
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Decision:*\n$DECISION\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Image Tag:*\n${{ github.event.inputs.image_tag }}\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Traffic Percentage:*\n${{ github.event.inputs.percentage }}%\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Duration:*\n${{ github.event.inputs.duration }} minutes\"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }" \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
