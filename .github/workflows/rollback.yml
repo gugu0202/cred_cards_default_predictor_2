@@ -1,0 +1,322 @@
+name: Emergency Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment:
+        description: 'Deployment to rollback'
+        required: true
+        default: 'credit-scoring-api'
+        type: choice
+        options:
+        - 'credit-scoring-api'
+        - 'credit-scoring-training'
+        - 'credit-scoring-monitoring'
+      namespace:
+        description: 'Kubernetes namespace'
+        required: true
+        default: 'credit-scoring-production'
+      revision:
+        description: 'Revision to rollback to (leave empty for previous)'
+        required: false
+        default: ''
+      reason:
+        description: 'Reason for rollback'
+        required: true
+        default: 'Performance issues'
+        type: choice
+        options:
+        - 'Performance issues'
+        - 'High error rate'
+        - 'Security vulnerability'
+        - 'Customer reported issue'
+        - 'Other'
+
+env:
+  SLACK_CHANNEL: '#alerts'
+
+jobs:
+  validate-rollback:
+    name: Validate Rollback Request
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check permissions
+      run: |
+        # Проверяем, что пользователь имеет права на rollback
+        if [ "${{ github.actor }}" != "ml-team" ] && [ "${{ github.actor }}" != "devops-team" ]; then
+          echo "Error: User ${{ github.actor }} not authorized for rollback"
+          exit 1
+        fi
+        
+        echo "✅ User ${{ github.actor }} authorized for rollback"
+
+    - name: Get current deployment status
+      id: status
+      run: |
+        echo "Checking deployment ${{ github.event.inputs.deployment }} in namespace ${{ github.event.inputs.namespace }}"
+        
+        # Здесь можно добавить проверку текущего статуса deployment
+        # через kubectl если настроен доступ
+        
+        echo "status=valid" >> $GITHUB_OUTPUT
+
+  execute-rollback:
+    name: Execute Rollback
+    runs-on: ubuntu-latest
+    needs: validate-rollback
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Set up Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBECONFIG_PRODUCTION }}
+
+    - name: Get deployment history
+      id: history
+      run: |
+        echo "Getting revision history for ${{ github.event.inputs.deployment }}..."
+        
+        REVISIONS=$(kubectl rollout history deployment/${{ github.event.inputs.deployment }} \
+          -n ${{ github.event.inputs.namespace }} \
+          --output=json)
+        
+        echo "revisions=$REVISIONS" >> $GITHUB_OUTPUT
+        
+        # Отображаем историю
+        kubectl rollout history deployment/${{ github.event.inputs.deployment }} \
+          -n ${{ github.event.inputs.namespace }}
+
+    - name: Perform rollback
+      id: rollback
+      run: |
+        echo "Initiating rollback for ${{ github.event.inputs.deployment }}..."
+        
+        if [ -z "${{ github.event.inputs.revision }}" ]; then
+          echo "Rolling back to previous revision..."
+          kubectl rollout undo deployment/${{ github.event.inputs.deployment }} \
+            -n ${{ github.event.inputs.namespace }}
+        else
+          echo "Rolling back to revision ${{ github.event.inputs.revision }}..."
+          kubectl rollout undo deployment/${{ github.event.inputs.deployment }} \
+            -n ${{ github.event.inputs.namespace }} \
+            --to-revision=${{ github.event.inputs.revision }}
+        fi
+        
+        echo "status=started" >> $GITHUB_OUTPUT
+
+    - name: Wait for rollback completion
+      run: |
+        echo "Waiting for rollback to complete..."
+        
+        kubectl rollout status deployment/${{ github.event.inputs.deployment }} \
+          -n ${{ github.event.inputs.namespace }} \
+          --timeout=300s
+        
+        echo "✅ Rollback completed successfully"
+
+    - name: Verify rollback
+      run: |
+        echo "Verifying rollback..."
+        
+        # Проверяем, что pods запущены
+        kubectl get pods -n ${{ github.event.inputs.namespace }} \
+          -l app=${{ github.event.inputs.deployment }} \
+          -o wide
+        
+        # Проверяем health endpoints
+        SERVICE_NAME=$(kubectl get deployment ${{ github.event.inputs.deployment }} \
+          -n ${{ github.event.inputs.namespace }} \
+          -o jsonpath='{.spec.selector.matchLabels.app}')
+        
+        if [ -n "$SERVICE_NAME" ]; then
+          kubectl run rollback-test --rm -i --tty --image=curlimages/curl \
+            --restart=Never -- \
+            curl -f http://$SERVICE_NAME.${{ github.event.inputs.namespace }}.svc.cluster.local:8000/health
+        fi
+
+    - name: Send rollback notification
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"attachments\": [
+              {
+                \"color\": \"#ff0000\",
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"*🚨 EMERGENCY ROLLBACK EXECUTED*\" 
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"fields\": [
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Deployment:*\n${{ github.event.inputs.deployment }}\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Namespace:*\n${{ github.event.inputs.namespace }}\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Revision:*\n${{ github.event.inputs.revision || 'Previous' }}\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Reason:*\n${{ github.event.inputs.reason }}\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Initiator:*\n${{ github.actor }}\"
+                      },
+                      {
+                        \"type\": \"mrkdwn\",
+                        \"text\": \"*Time:*\n$(date)\"
+                      }
+                    ]
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"*Status:* ✅ Rollback completed successfully\"
+                    }
+                  }
+                ]
+              }
+            ]
+          }" \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  post-rollback-analysis:
+    name: Post-Rollback Analysis
+    runs-on: ubuntu-latest
+    needs: execute-rollback
+    if: always()
+    
+    steps:
+    - name: Collect post-rollback metrics
+      run: |
+        echo "Collecting metrics after rollback..."
+        
+        # Собираем метрики для анализа
+        python scripts/monitoring/analyze_rollback_impact.py \
+          --deployment ${{ github.event.inputs.deployment }} \
+          --namespace ${{ github.event.inputs.namespace }} \
+          --duration 30 \
+          --output rollback-analysis.json
+
+    - name: Generate rollback report
+      run: |
+        echo "Generating rollback report..."
+        
+        REPORT=$(jq -n \
+          --arg deployment "${{ github.event.inputs.deployment }}" \
+          --arg namespace "${{ github.event.inputs.namespace }}" \
+          --arg reason "${{ github.event.inputs.reason }}" \
+          --arg initiator "${{ github.actor }}" \
+          --arg time "$(date)" \
+          --arg status "${{ needs.execute-rollback.result }}" \
+          '{
+            deployment: $deployment,
+            namespace: $namespace,
+            reason: $reason,
+            initiator: $initiator,
+            timestamp: $time,
+            status: $status,
+            analysis: "See attached file"
+          }')
+        
+        echo "$REPORT" > rollback-summary.json
+
+    - name: Upload rollback artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: rollback-artifacts-${{ github.run_id }}
+        path: |
+          rollback-analysis.json
+          rollback-summary.json
+
+    - name: Create incident ticket
+      if: failure()
+      run: |
+        echo "Creating incident ticket for failed rollback..."
+        
+        # Здесь можно интегрировать с Jira, ServiceNow и т.д.
+        # Пример для Jira:
+        # curl -X POST ${{ secrets.JIRA_WEBHOOK_URL }} \
+        #   -H "Content-Type: application/json" \
+        #   -d '{
+        #     "fields": {
+        #       "project": { "key": "INCIDENT" },
+        #       "summary": "Failed Rollback: ${{ github.event.inputs.deployment }}",
+        #       "description": "Rollback failed for deployment ${{ github.event.inputs.deployment }} in namespace ${{ github.event.inputs.namespace }}",
+        #       "issuetype": { "name": "Incident" }
+        #     }
+        #   }'
+        
+        echo "Incident ticket creation placeholder"
+
+  notify-stakeholders:
+    name: Notify Stakeholders
+    runs-on: ubuntu-latest
+    needs: [execute-rollback, post-rollback-analysis]
+    if: always()
+    
+    steps:
+    - name: Send summary to stakeholders
+      run: |
+        STATUS=${{ needs.execute-rollback.result }}
+        
+        if [ "$STATUS" == "success" ]; then
+          EMOJI="✅"
+          MESSAGE="Rollback completed successfully"
+        else
+          EMOJI="❌"
+          MESSAGE="Rollback failed"
+        fi
+        
+        # Отправляем email уведомление
+        python scripts/utils/send_email.py \
+          --to "ml-team@company.com,devops@company.com" \
+          --subject "$EMOJI Rollback Notification: ${{ github.event.inputs.deployment }}" \
+          --body "Rollback executed for ${{ github.event.inputs.deployment }}\nReason: ${{ github.event.inputs.reason }}\nStatus: $MESSAGE"
+        
+        # Отправляем в Microsoft Teams
+        curl -X POST ${{ secrets.TEAMS_WEBHOOK_URL }} \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"@type\": \"MessageCard\",
+            \"@context\": \"http://schema.org/extensions\",
+            \"themeColor\": \"$([ \"$STATUS\" == \"success\" ] && echo \"0076D7\" || echo \"FF0000\")\",
+            \"summary\": \"Rollback Notification\",
+            \"sections\": [{
+              \"activityTitle\": \"$EMOJI Rollback Executed\",
+              \"facts\": [{
+                \"name\": \"Deployment\",
+                \"value\": \"${{ github.event.inputs.deployment }}\"
+              }, {
+                \"name\": \"Status\",
+                \"value\": \"$MESSAGE\"
+              }, {
+                \"name\": \"Initiator\",
+                \"value\": \"${{ github.actor }}\"
+              }, {
+                \"name\": \"Reason\",
+                \"value\": \"${{ github.event.inputs.reason }}\"
+              }],
+              \"markdown\": true
+            }]
+          }"
