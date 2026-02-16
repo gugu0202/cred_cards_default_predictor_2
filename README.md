@@ -3,66 +3,66 @@ ML Model Deployment Pipeline
 
 
 Полная структура проекта
-├── .github/                                   # Конфигурация CI/CD и рабочих потоков GitHub Actions
-│   └── workflows/
-│       ├── canary-release.yml                 # Постепенный релиз новых версий
-│       ├── ci-cd.yml                          # Непрерывная интеграция и доставка
-│       └── rollback.yml                       # Роликбэк при неудачном релизе
-├── dags/                                      # Директория с DAG-файлами Apache Airflow
-│   └── credit_scoring_retraining.py           # Периодический пайплайн перереучивания модели
-├── deployment/                               # Конфигурации для деплоймента и эксплуатации
-│   ├── docker/                                # Dockerfiles для контейнеризации компонентов
-│   │   ├── Dockerfile.api                     # Dockerfile для API-контейнеров
-│   │   └── Dockerfile.training                # Dockerfile для контейнеров обучения
-│   ├── istio/                                 # Конфигурации Istio для траффик-менеджмента
-│   │   └── blue-green-virtual-service.yaml   # Blue-Green виртуальная служба для трафика
-│   ├── kubernetes/                            # Манифесты Kubernetes для развертывания
-│   │   ├── api-deployment.yaml                # Деплоимент API-серверов
-│   │   ├── api-service.yaml                   # Сервис Kubernetes для API
-│   │   ├── configmap.yaml                     # ConfigMaps для настройки окружения
-│   │   ├── hpa.yaml                           # Горизонтальное автомасштабирование HPA
-│   │   ├── pvc.yaml                           # PersistentVolumeClaim для постоянных дисков
-│   │   └── values.yaml                        # Values для helm-чартов
-│   └── monitoring/                           # Конфигурации мониторинга и отчетов
-│       ├── dashboards/                        # Границы графиков для мониторинга
-│       │   ├── prometheus-values.yaml         # Yaml для конфигурации Prometheus
-│       │   └── drift-detection.json           # Формат отчета по обнаружению дрифт-данных
-│       ├── rules/                             # Правило-алерты и правила сбора метрик
-│       │   ├── alerting-rules.yaml            # Alerts для мониторинга
-│       │   └── recording-rules.yaml           # Правила записи метрик
-│       ├── runbooks/                          # Runbooks для решения проблем
-│       │   └── incident-response.md           # Документ по реакции на инциденты
-│       ├── elk-values.yaml                    # Конфигурация ELK стэка
-│       └── prometheus-values.yaml             # Global конфигурация Prometheus
-├── infrastructure/                           # Терраформ инфраструктура
-│   ├── modules/                              # Повторно используемые Terraform-модули
-│   │   ├── kubernetes/                       # Модуль для Kubernetes
-│   │   │   └── main.tf                       # Main файл Kubernetes-модуля
-│   │   ├── monitoring/                       # Модуль для инструментов мониторинга
-│   │   │   └── main.tf                       # Main файл Monitoring-модуля
-│   │   └── network/                          # Модуль для сетей и VPN
-│   │       └── main.tf                       # Main файл Network-модуля
-│   ├── templates/                            # Templates для генерируемых файлов
-│   │   └── kubeconfig.tpl                    # Шаблон Kubeconfig
-│   ├── main.tf                               # Главные настройки Terraform
-│   ├── outputs.tf                            # Выходы инфраструктуры
-│   └── terraform.tfvars.example              # Пример переменных Terraform
-├── scripts/                                 # Утилиты и сценарии автоматизации
-│   ├── model_training/                       # Директория с инструментами для обучения моделей
-│   │   ├── onnx_conversion.py                # Преобразует модель в формат ONNX
-│   │   ├── train_nn_model.py                 # Обучает нейросеть
-│   │   └── validate_conversion.py            # Валидирует преобразованную модель
-│   ├── monitoring/                           # Директория для инструментов мониторинга
-│   │   └── drift_detection.py                # Скрипт для выявления дрифта данных
-│   ├── optimization/                         # Директория для оптимизации моделей
-│   │   ├── pruning.py                        # Выполняет сокращение модели
-│   │   └── quantization.py                   # Проводит квантизацию модели
-│   └── perfomance/                           # Директория для бенчмарков и тестов производительности
-│       ├── benchmark.py                       # Производительность API и модели
-│       ├── compare_configs.py                 # Сравнивает разные конфигурации производительности
-│       └── load_testing.py                    # Load testing script
-├── Makefile.txt                             # Удобный интерфейс сборки проекта
-└── requirements.txt                         # Зависимости Python
+├── .github/                                   # CI/CD-конфигурации и рабочие процессы GitHub Actions \
+│   └── workflows/                             # Рабочие потоки CI/CD \
+│       ├── canary-release.yml                  # Конфигурация Canary-релиза \
+│       ├── ci-cd.yml                           # Конфигурация основной CI/CD конвейера \
+│       └── rollback.yml                        # Механизм роллбэка при сбое деплоя \
+├── dags/                                      # Директория с DAG-файлами Apache Airflow \
+│   └── credit_scoring_retraining.py           # Планировщик периодического перереучивания модели \
+├── deployment/                               # Конфигурации и артефакты для деплоя \
+│   ├── docker/                                # Dockerfiles для контейнеризации микросервисов \
+│   │   ├── Dockerfile.api                     # Dockerfile для API-контейнера \
+│   │   └── Dockerfile.training                # Dockerfile для обучения модели \
+│   ├── istio/                                 # Conf файлы для обслуживания и маршрутизации с Istio \
+│   │   └── blue-green-virtual-service.yaml    # Конфигурация Blue-Green VirtualService для переключения \
+│   ├── kubernetes/                            # Кубернетес-манифесты для развертывания и оркестрации \
+│   │   ├── api-deployment.yaml                # Конфигурация Deployments для API \
+│   │   ├── api-service.yaml                   # Service ресурс для публичного доступа к API \
+│   │   ├── configmap.yaml                     # Конфигурационные карты для окружений \
+│   │   ├── hpa.yaml                           # HPA настройка горизонтального автоскейлинга \
+│   │   ├── pvc.yaml                           # PVC (Persistent Volume Claims) для хранения данных \
+│   │   └── values.yaml                        # Default значения для Helm чарта \
+│   └── monitoring/                           # Мониторинговые инструменты и шаблоны \
+│       ├── dashboards/                        # Dashboards для Grafana и Prometheus \
+│       │   ├── prometheus-values.yaml         # Прометеус настроечные значения \
+│       │   └── drift-detection.json           # Template отчёта по обнаружению дрифта данных \
+│       ├── rules/                             # Правила для Prometheus \
+│       │   ├── alerting-rules.yaml            # Alertrules для Prometheus \
+│       │   └── recording-rules.yaml           # Recording-правила для сборщика метрик \
+│       ├── runbooks/                          # Инструкции по устранению аварийных ситуаций \
+│       │   └── incident-response.md           # Порядок действий при возникновении инцидента \
+│       ├── elk-values.yaml                    # Конфигурация ELK stack \
+│       └── prometheus-values.yaml             # Глобальные настройки Prometheus \
+├── infrastructure/                           # Infrastructure-as-code: Terrafom-файлы \
+│   ├── modules/                              # Библиотека повторно используемых модулей Terrform \
+│   │   ├── kubernetes/                       # Module для Kubernetes \
+│   │   │   └── main.tf                       # Основной файл для Kubernetes-модуля \
+│   │   ├── monitoring/                       # Module для мониторинга инфраструктуры \
+│   │   │   └── main.tf                       # Основной файл для Monitoring-модуля \
+│   │   └── network/                          # Module для сети и VPC \
+│   │       └── main.tf                       # Основной файл для Network-модуля \
+│   ├── templates/                            # Шаблоны файлов инфраструктуры \
+│   │   └── kubeconfig.tpl                    # Шаблон для генерации kubeconfig-файлов \
+│   ├── main.tf                               # Главный конфигурационный файл инфраструктуры \
+│   ├── outputs.tf                            # Output-ресурсы инфраструктуры \
+│   └── terraform.tfvars.example              # Пример файла с переменными Terraform \
+├── scripts/                                 # Сценарии и утилиты для поддержки и обучения \
+│   ├── model_training/                       # Сценарии для обучения и преобразования моделей \
+│   │   ├── onnx_conversion.py                # Скрипт для конверсии модели в формат ONNX \
+│   │   ├── train_nn_model.py                 # Обучение нейросетевых моделей \
+│   │   └── validate_conversion.py            # Валидация конвертируемой модели \
+│   ├── monitoring/                           # Скрипты для мониторинга качества и стабильности \
+│   │   └── drift_detection.py                # Алгоритм обнаружения дрифта данных \
+│   ├── optimization/                         # Сценарии для оптимизации моделей \
+│   │   ├── pruning.py                        # Уменьшение размеров модели путём Pruning \
+│   │   └── quantization.py                   # Квантизация модели для экономии памяти \
+│   └── perfomance/                           # Инструменты для бенчмаркинга и нагрузочных тестов \
+│       ├── benchmark.py                      # Измерение производительности \
+│       ├── compare_configs.py                # Сравнение различных конфигураций \
+│       └── load_testing.py                    # Нагрузочные тесты API \
+├── Makefile.txt                             # Сценарий для автоматизации сборки и запуска проекта \
+└── requirements.txt                         # Файл зависимостей Python \
 
 # Инициализация Terraform
 cd infrastructure/terraform
@@ -72,21 +72,3 @@ terraform init
 
 # План
 terraform plan -var-file="production.tfvars"
-
-# Применение
-terraform apply -var-file="production.tfvars"
-Получение kubeconfig
-yandex managed-kubernetes cluster get-credentials <cluster-id> --external
-CI/CD Pipeline
-GitHub Actions автоматически:
-
-Запускает тесты и линтинг
-Проверяет безопасность (Trivy, Bandit)
-Собирает Docker образы
-Развертывает в staging
-После одобрения - в production
-Для настройки необходимо добавить secrets в GitHub:
-
-Оценка новой модели
-Сравнение с production
-Развертывание (если лучше)
